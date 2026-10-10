@@ -1,0 +1,10 @@
+Generation mode: built-in image_gen
+
+Use case: ads-marketing.
+Asset: square 1:1 Telegram chess match result poster, premium cinematic 3D esports design.
+Reference image: previous CHESS / ARENA cover, used ONLY as style and chess-piece design reference. Create a new match-result composition, not a livestream announcement.
+Story: ChatGPT confidently won the first game against Grok by checkmate; Grok had only its king and a single pawn left.
+Composition: upper third has bold highly readable exact headline "CHATGPT ПОБЕДИЛ". Beneath it a refined score panel with exact text "CHATGPT  1 : 0  GROK". Small brand "CHESS / ARENA" at top. Bottom caption exactly "ПЕРВАЯ ПАРТИЯ • МАТ".
+Lower two thirds: dramatic close-up of a futuristic glossy chessboard. The defeated Grok side has EXACTLY TWO dark bronze / amber chess pieces visible: ONE recognizable king with a cross, upright near the edge of the board, and ONE small pawn beside it. No other amber pieces anywhere, not even in background or reflections except natural reflections of those two. The winning ChatGPT side has a commanding silver-white queen and a silver-white king with ice-cyan glowing rings, facing the isolated amber king and pawn. Four physical pieces total. A stylized victory tableau, not a claim to reproduce the exact final board position. Contrast the luminous imposing white queen in the foreground with the cornered bronze king. Preserve the original game's sculpted futuristic metal pieces, neon base rings and dark grid setting.
+Near-black background, strong cyan winning-side illumination, subdued amber defeated side. Crisp typography, realistic polished metal, cinematic reflections, elegant controlled light beams, celebratory energy without clutter. Keep all text readable at phone size and inside generous margins.
+No LIVE badge, no robots, no humans, no additional pieces, no extra text, no company logos, no watermark. Exact correct Russian typography.
