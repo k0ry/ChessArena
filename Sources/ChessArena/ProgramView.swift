@@ -16,10 +16,7 @@ struct ProgramView: View {
                     HStack(spacing: 12) {
                         Text("CHESS / ARENA")
                             .font(.system(size: 28, weight: .black, design: .rounded)).tracking(4)
-                        Rectangle().fill(.cyan.opacity(0.5)).frame(height: 1)
-                        Text(runtime.matchRunning ? "MATCH IN PROGRESS" : "NEURAL CHESS SHOW")
-                            .font(.system(size: 12, weight: .semibold, design: .monospaced)).tracking(2)
-                            .foregroundStyle(.cyan)
+                        Spacer()
                     }
                     .padding(.horizontal, 40).padding(.top, 24)
                     HStack {
@@ -51,12 +48,27 @@ struct ProgramView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            ReplyWindow(picture: runtime.picture)
+            ReplyWindow(picture: runtime.picture, language: runtime.language)
                 .padding(28)
                 .frame(width: replyColumn)
         }
         .frame(width: CGFloat(StageMetrics.width), height: CGFloat(StageMetrics.height))
         .background(Color.black)
+        .overlay {
+            if runtime.result != nil {
+                ResultSplash(title: runtime.resultTitle,
+                             whiteName: runtime.picture.whiteName, blackName: runtime.picture.blackName,
+                             score: runtime.score, seconds: runtime.nextGameIn, language: runtime.language,
+                             winner: runtime.result?.winner)
+                    .transition(.opacity)
+            }
+        }
+        .overlay(alignment: .top) {
+            SeriesScoreboard(whiteName: runtime.picture.whiteName, blackName: runtime.picture.blackName,
+                             score: runtime.score, language: runtime.language)
+                .padding(.top, 18)
+                .allowsHitTesting(false)
+        }
         .overlay(alignment: .top) {
             WindowDragArea()
                 .frame(height: 72)
@@ -67,10 +79,11 @@ struct ProgramView: View {
 
 private struct ReplyWindow: View {
     let picture: BroadcastPicture
+    let language: BroadcastLanguage
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("PLAYER COMMS")
+            Text(language.text("РЕПЛИКИ ИГРОКОВ", "PLAYER COMMS"))
                 .font(.system(size: 13, weight: .semibold))
                 .tracking(3)
                 .foregroundStyle(.white.opacity(0.45))
@@ -82,7 +95,7 @@ private struct ReplyWindow: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 22) {
                         if picture.replies.isEmpty && picture.thinkingSide == nil {
-                            Text("Waiting for the first reply.")
+                            Text(language.text("Ждём первый ход.", "Waiting for the first reply."))
                                 .font(.system(size: 22, weight: .medium, design: .serif))
                                 .foregroundStyle(.white.opacity(0.35))
                         }
@@ -103,15 +116,15 @@ private struct ReplyWindow: View {
 
             if let player = picture.pausedPlayer {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("\(player.uppercased()) · PAUSED")
+                    Text("\(player.uppercased()) · " + language.text("ПОВТОР ЗАПРОСА", "RETRYING"))
                         .font(.system(size: 13, weight: .semibold))
-                    Text("Player unavailable. Waiting to resume.")
+                    Text(language.text("Повторяем автоматически…", "Retrying automatically…"))
                         .font(.system(size: 22, weight: .medium, design: .serif))
                 }
                 .foregroundStyle(.orange)
                 .padding(24)
             } else if let side = picture.thinkingSide {
-                ThinkingLine(name: side == .white ? picture.whiteName : picture.blackName, side: side)
+                ThinkingLine(name: side == .white ? picture.whiteName : picture.blackName, side: side, language: language)
                     .padding(.horizontal, 28)
                     .padding(.top, 8)
                     .padding(.bottom, 24)
@@ -166,6 +179,7 @@ private struct ReplyCard: View {
 private struct ThinkingLine: View {
     let name: String
     let side: Side
+    let language: BroadcastLanguage
     @State private var dim = false
 
     var body: some View {
@@ -175,7 +189,7 @@ private struct ThinkingLine: View {
                 .font(.system(size: 13, weight: .semibold))
                 .tracking(1.6)
                 .foregroundStyle(color.opacity(0.72))
-            Text("thinking…")
+            Text(language.text("думает…", "thinking…"))
                 .font(.system(size: 28, weight: .medium, design: .serif))
                 .foregroundStyle(color)
                 .opacity(dim ? 0.4 : 1)

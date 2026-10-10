@@ -78,17 +78,17 @@ public final class MatchArchive {
     }
 
     public func close() async throws {
-        markResult(nil)
-        try writeSidecars()
-        try await writer?.finish()
-        writer = nil
+        try await finish(end: nil)
     }
 
     public func finish(end: GameEnd?) async throws {
+        guard isOpen else { return }
+        isOpen = false
+        let finishingWriter = writer
+        writer = nil
         markResult(end)
         try writeSidecars()
-        try await writer?.finish()
-        writer = nil
+        try await finishingWriter?.finish()
     }
 
     public func writeSidecars() throws {

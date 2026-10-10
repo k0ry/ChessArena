@@ -5,30 +5,13 @@ import XCTest
 @testable import ChessArenaCore
 
 final class BroadcastTests: XCTestCase {
-    func testChronicleClockPreparesAtFourTwentyAndKeepsLaterMarks() {
+    func testLiveGameNeverSchedulesPeriodicRecaps() {
         var director = ChronicleDirector()
-        XCTAssertTrue(director.advance(to: 259, voiceText: nil).isEmpty)
-        XCTAssertEqual(director.advance(to: 260, voiceText: nil), [.prepare(300)])
-        let started = director.advance(to: 300, voiceText: "Ten minutes is a lie, this is five.")
-        XCTAssertEqual(started, [.startChronicle(300), .startVoice("Ten minutes is a lie, this is five.")])
-        XCTAssertEqual(director.nextMark, 600)
-        _ = director.advance(to: 305, voiceText: "Ten minutes is a lie, this is five.")
-        XCTAssertEqual(director.now, 305)
-        XCTAssertEqual(director.nextMark, 600)
-        XCTAssertEqual(director.advance(to: 314, voiceText: nil), [.endChronicle])
-        XCTAssertEqual(director.advance(to: 600, voiceText: "later"), [.prepare(600), .startChronicle(600), .startVoice("later")])
-        XCTAssertEqual(director.nextMark, 900)
-    }
-
-    func testChronicleWaitsForASafeCutAndPlaysOnce() {
-        var director = ChronicleDirector()
-        director.blocked = true
-        XCTAssertEqual(director.advance(to: 260, voiceText: nil), [.prepare(300)])
-        XCTAssertEqual(director.advance(to: 300, voiceText: "ready"), [])
-        director.blocked = false
-        XCTAssertEqual(director.advance(to: 305, voiceText: "ready"), [.startChronicle(300), .startVoice("ready")])
-        XCTAssertEqual(director.advance(to: 310, voiceText: "ready"), [])
-        XCTAssertEqual(director.advance(to: 319, voiceText: nil), [.endChronicle])
+        for time in [259.0, 260, 300, 314, 560, 600, 900, 3600, 86400] {
+            XCTAssertTrue(director.advance(to: time).isEmpty)
+            XCTAssertEqual(director.phase, .live)
+            XCTAssertEqual(director.now, time)
+        }
     }
 
     func testReplayRunsFromTheFirstMoveWithSideTints() {
@@ -45,30 +28,17 @@ final class BroadcastTests: XCTestCase {
         XCTAssertEqual(limitWords(long).split(separator: " ").count, 45)
     }
 
-    func testLateVoiceAndShortGameStillScheduleTheChronicle() {
-        var late = ChronicleDirector()
-        _ = late.advance(to: 260, voiceText: nil)
-        XCTAssertEqual(late.advance(to: 300, voiceText: nil), [.startChronicle(300)])
-        XCTAssertEqual(late.advance(to: 302, voiceText: "Two moves and a mood."), [.startVoice("Two moves and a mood.")])
-
-        var early = ChronicleDirector()
-        XCTAssertEqual(early.advance(to: 300, voiceText: "Almost nothing happened, proudly."), [.prepare(300), .startChronicle(300), .startVoice("Almost nothing happened, proudly.")])
-    }
-
-    func testFinalCardReplacesOrFollowsTheChronicle() {
-        var pending = ChronicleDirector()
-        pending.gameOver = true
-        XCTAssertEqual(pending.advance(to: 120, voiceText: nil), [.startFinal])
-        XCTAssertEqual(pending.advance(to: 134, voiceText: nil), [.endFinal])
-        XCTAssertTrue(pending.advance(to: 300, voiceText: "nope").isEmpty)
-
-        var playing = ChronicleDirector()
-        _ = playing.advance(to: 300, voiceText: "live")
-        playing.gameOver = true
-        XCTAssertEqual(playing.advance(to: 305, voiceText: "live"), [])
-        XCTAssertEqual(playing.advance(to: 314, voiceText: nil), [.endChronicle, .startFinal])
-        XCTAssertEqual(playing.advance(to: 328, voiceText: nil), [.endFinal])
-        XCTAssertTrue(playing.advance(to: 600, voiceText: "extra").isEmpty)
+    func testFinalCardStartsOnlyAfterGameOverAndPlaysOnce() {
+        for endTime in [120.0, 300, 605] {
+            var director = ChronicleDirector()
+            XCTAssertTrue(director.advance(to: endTime).isEmpty)
+            director.gameOver = true
+            XCTAssertEqual(director.advance(to: endTime), [.startFinal])
+            XCTAssertTrue(director.advance(to: endTime + 29).isEmpty)
+            XCTAssertEqual(director.advance(to: endTime + 30), [.endFinal])
+            XCTAssertEqual(director.phase, .done)
+            XCTAssertTrue(director.advance(to: endTime + 300).isEmpty)
+        }
     }
 
     func testSceneShowsDistinctPiecesAndMoveTrail() throws {

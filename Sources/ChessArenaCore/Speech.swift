@@ -18,12 +18,18 @@ public struct SpokenLine: Equatable, Sendable {
     public var clock: TimeInterval
 }
 
+@MainActor
 public protocol Voice: AnyObject {
+    var language: BroadcastLanguage { get set }
+    func stop()
     var isSpeaking: Bool { get }
     func speak(_ text: String, kind: SpeechKind) async -> [Int16]
 }
 
+@MainActor
 public final class ScriptedVoice: Voice {
+    public var language: BroadcastLanguage = .english
+    public func stop() { release() }
     public private(set) var isSpeaking = false
     public var lines: [SpokenLine] = []
     public var hold = false
@@ -50,51 +56,95 @@ public final class ScriptedVoice: Voice {
     }
 }
 
+@MainActor
 public final class SystemVoice: NSObject, Voice {
+    public var language: BroadcastLanguage = .russian
     public private(set) var isSpeaking = false
     private let synthesizer = AVSpeechSynthesizer()
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private var engineReady = false
+    private var utteranceID = UUID()
+    private var continuation: CheckedContinuation<[Int16], Never>?
+    private var samples: [Int16] = []
+    private var pendingBuffers = 0
+    private var synthesisFinished = false
 
     public override init() {
         super.init()
         engine.attach(player)
     }
 
-    public func speak(_ text: String, kind: SpeechKind) async -> [Int16] {
-        isSpeaking = true
-        let samples: [Int16] = await withCheckedContinuation { continuation in
-            var collected: [Int16] = []
-            var resumed = false
-            let utterance = AVSpeechUtterance(string: text)
-            utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
-            utterance.rate = AVSpeechUtteranceDefaultSpeechRate
-            self.synthesizer.write(utterance) { buffer in
-                guard let pcm = buffer as? AVAudioPCMBuffer else { return }
-                if pcm.frameLength == 0 {
-                    if !resumed {
-                        resumed = true
-                        continuation.resume(returning: collected)
-                    }
-                    return
-                }
-                self.play(pcm)
-                collected.append(contentsOf: Self.int16Samples(from: pcm))
-            }
-        }
+    public func stop() {
+        utteranceID = UUID()
+        synthesizer.stopSpeaking(at: .immediate)
+        player.stop()
+        engine.stop()
+        engine.disconnectNodeOutput(player)
+        engineReady = false
         isSpeaking = false
-        return samples
+        let waiting = continuation
+        continuation = nil
+        waiting?.resume(returning: [])
     }
 
-    private func play(_ buffer: AVAudioPCMBuffer) {
+    public func speak(_ text: String, kind: SpeechKind) async -> [Int16] {
+        stop()
+        let id = UUID()
+        utteranceID = id
+        samples = []; pendingBuffers = 0; synthesisFinished = false
+        isSpeaking = true
+        return await withTaskCancellationHandler {
+            guard !Task.isCancelled else { stop(); return [] }
+            return await withCheckedContinuation { continuation in
+                self.continuation = continuation
+                let utterance = AVSpeechUtterance(string: text)
+                utterance.voice = AVSpeechSynthesisVoice(language: language.rawValue)
+                utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+                synthesizer.write(utterance) { [weak self] buffer in
+                    guard let pcm = buffer as? AVAudioPCMBuffer else { return }
+                    Task { @MainActor [weak self] in
+                        guard let self, self.utteranceID == id else { return }
+                        if pcm.frameLength == 0 {
+                            self.synthesisFinished = true
+                            self.finishIfReady()
+                        } else {
+                            self.samples.append(contentsOf: Self.int16Samples(from: pcm))
+                            self.play(pcm, id: id)
+                        }
+                    }
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                guard let self, self.utteranceID == id else { return }
+                self.stop()
+            }
+        }
+    }
+
+    private func finishIfReady() {
+        guard synthesisFinished, pendingBuffers == 0, let continuation else { return }
+        self.continuation = nil
+        isSpeaking = false
+        continuation.resume(returning: samples)
+    }
+
+    private func play(_ buffer: AVAudioPCMBuffer, id: UUID) {
         if !engineReady {
             engine.connect(player, to: engine.mainMixerNode, format: buffer.format)
-            try? engine.start()
+            do { try engine.start() } catch { return }
             player.play()
             engineReady = true
         }
-        player.scheduleBuffer(buffer, completionHandler: nil)
+        pendingBuffers += 1
+        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.utteranceID == id else { return }
+                self.pendingBuffers -= 1
+                self.finishIfReady()
+            }
+        }
     }
 
     private static func int16Samples(from buffer: AVAudioPCMBuffer) -> [Int16] {
@@ -104,10 +154,8 @@ public final class SystemVoice: NSObject, Voice {
             return Array(UnsafeBufferPointer(start: channel[0], count: frames))
         }
         guard let channel = buffer.floatChannelData else { return [] }
-        let floats = UnsafeBufferPointer(start: channel[0], count: frames)
-        return floats.map { sample in
-            let clipped = max(-1, min(1, sample))
-            return Int16(clipped * 32767)
+        return UnsafeBufferPointer(start: channel[0], count: frames).map {
+            Int16(max(-1, min(1, $0)) * 32767)
         }
     }
 }

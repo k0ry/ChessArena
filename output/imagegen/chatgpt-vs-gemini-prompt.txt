@@ -1,0 +1,10 @@
+Generation mode: built-in image_gen
+
+Use case: ads-marketing.
+Asset: EXACTLY SQUARE 1:1 Telegram announcement poster for the next Chess Arena livestream.
+Input reference: previous victory poster, style reference only; replace all its match result content with a new matchup announcement.
+Primary request: ChatGPT VS Gemini, next live chess battle, coming soon while Gemini integration is being finished. This is an upcoming event, not currently live and not a result.
+Visual style: polished cinematic 3D futuristic chess arena, glossy black chessboard, sculpted metallic chess pieces with luminous base rings, dark geometric grid environment, strong readable esports typography. Match the reference brand quality and aesthetic.
+Composition: top small brand text exactly "CHESS / ARENA". Dominant central headline on three lines, exactly "CHATGPT" then "VS" then "GEMINI". Equal typographic weight to both competitors. ChatGPT word in silver-white with cyan accents; Gemini word in silver-white with blue-violet accents. Below headline exact Russian subtitle "СЛЕДУЮЩИЙ БОЙ". Bottom badge exact text "СКОРО В ПРЯМОМ ЭФИРЕ". No other text.
+Lower half imagery: two equal-size imposing recognizable chess kings facing each other over a coherent perspective chessboard. Left king silver metal with ice-cyan luminous rings; right king dark iridescent metal with electric blue and violet luminous rings. Smaller supporting chess pieces in soft depth of field behind each leader. Tense anticipation, balanced rivals, dramatic cyan and violet light beams, subtle particles, rich near-black negative space behind the typography.
+Constraints: square canvas with generous safe margins; crisp legibility on a phone; no Grok, no score, no victory text, no winner, no LIVE badge suggesting broadcast is already running, no dates or times, no humans, no robots, no invented logos, no watermark. Correct exact Russian spelling.

@@ -11,6 +11,17 @@ public final class MatchEngine {
     public var black: Seat
     public var host: Seat
     public var animationDuration: TimeInterval = 0
+    public var language: BroadcastLanguage = .english
+    public var modelLog: ModelLog?
+    private var playerLogID: UUID?
+    public var requestTimeout: TimeInterval = RequestTimeouts.player
+    public var hostTimeout: TimeInterval = 12
+    public var onGameEnded: ((GameEnd) -> Void)?
+    public private(set) var retryAt: TimeInterval?
+    private var retryCount = 0
+    private var stopped = false
+    private var auxiliaryTasks: [UUID: Task<Void, Never>] = [:]
+    private var turnTasks: [Int: Task<Void, Never>] = [:]
 
     public private(set) var referee = Referee()
     public private(set) var director = ChronicleDirector()
@@ -20,7 +31,6 @@ public final class MatchEngine {
     public private(set) var clock: TimeInterval = 0
     public private(set) var moveRequestCount = 0
     public private(set) var boardVersion = 0
-    public private(set) var chronicleVisuals = 0
     public private(set) var finalCards = 0
     public private(set) var paused = false
     public private(set) var pauseReason: String?
@@ -33,11 +43,7 @@ public final class MatchEngine {
     private var thinkStarted: TimeInterval = 0
     private var waitSpoken = false
     private var lastRejection: String?
-    private var chronicleText: String?
-    private var chronicleVoiceSent = false
-    private var deferredMove: (String, Int)?
     private var animatingUntil: TimeInterval?
-    private var speaking = false
     private var started = false
     private var sawFinal = false
     private var replies: [ModelReply] = []
@@ -61,7 +67,8 @@ public final class MatchEngine {
     }
 
     public func toneTest() async -> SpokenLine {
-        let line = SpokenLine(kind: .tone, text: ModelCatalog.toneTest, boardVersion: boardVersion, clock: clock)
+        voice.language = language
+        let line = SpokenLine(kind: .tone, text: language.toneTest, boardVersion: boardVersion, clock: clock)
         _ = await voice.speak(line.text, kind: .tone)
         speech.append(line)
         return line
@@ -79,13 +86,14 @@ public final class MatchEngine {
     }
 
     public func advance(to time: TimeInterval) async {
+        guard !stopped else { return }
         clock = time
+        if let retryAt, time >= retryAt { resume() }
         if let until = animatingUntil, time >= until {
             animatingUntil = nil
             scene.finishAnimation()
         }
-        syncBlocked()
-        let cues = director.advance(to: time, voiceText: chronicleText)
+        let cues = director.advance(to: time)
         for cue in cues {
             await handle(cue)
         }
@@ -94,11 +102,25 @@ public final class MatchEngine {
     }
 
     public func resume() {
-        guard paused, referee.end == nil else { return }
+        guard !stopped, paused, referee.end == nil else { return }
         paused = false
+        retryAt = nil
         pauseReason = nil
         phase = "thinking"
         beginThink()
+    }
+
+    public func stop() {
+        stopped = true
+        thinkGeneration += 1
+        waitEpoch += 1
+        thinkTask?.cancel(); thinkTask = nil
+        auxiliaryTasks.values.forEach { $0.cancel() }; auxiliaryTasks.removeAll()
+        turnTasks.values.forEach { $0.cancel() }; turnTasks.removeAll()
+        retryAt = nil; paused = false
+        scene.setThinking(nil)
+        voice.stop()
+        refreshPicture()
     }
 
     public func appendFrame(_ buffer: CVPixelBuffer) {
@@ -111,7 +133,7 @@ public final class MatchEngine {
     }
 
     private func beginThink() {
-        guard thinkTask == nil, referee.end == nil, !paused, !chronicleActive, !finalActive else { return }
+        guard !stopped, thinkTask == nil, referee.end == nil, !paused, !finalActive else { return }
         thinkGeneration += 1
         let generation = thinkGeneration
         thinkStarted = clock
@@ -122,10 +144,16 @@ public final class MatchEngine {
         moveRequestCount += 1
         thinkTask = Task { [weak self] in
             guard let self else { return }
+            defer { self.turnTasks.removeValue(forKey: generation) }
             do {
-                let text = try await self.transport.complete(call)
+                let side = self.referee.position.sideToMove
+                let player = side == .white ? self.white.name : self.black.name
+                let text = try await self.complete(call, context: "Ход \(side == .white ? "белых" : "чёрных") · \(player)", timeout: self.requestTimeout, player: true)
+                guard !Task.isCancelled, !self.stopped else { return }
                 self.onPlayerWaiting?()
                 await self.ingest(text, generation: generation)
+            } catch is CancellationError {
+                return
             } catch let error as ChatError where error == .unreadable {
                 self.onPlayerWaiting?()
                 await self.ingest("", generation: generation)
@@ -134,29 +162,25 @@ public final class MatchEngine {
                 await self.stall(generation: generation, error: error as? ChatError ?? .transport)
             }
         }
+        turnTasks[generation] = thinkTask
         refreshPicture()
     }
 
-    private func ingest(_ text: String, generation: Int, record: Bool = true) async {
-        guard generation == thinkGeneration else { return }
+    private func ingest(_ text: String, generation: Int) async {
+        guard !stopped, generation == thinkGeneration else { return }
         thinkTask = nil
         waitEpoch += 1
         scene.setThinking(nil)
         picture.thinkingSide = nil
-        if record {
-            let side = referee.position.sideToMove
-            let seat = side == .white ? white : black
-            noteReply(side: side, name: seat.name, text: text)
-        }
-        if chronicleActive || finalActive {
-            deferredMove = (text, generation)
-            return
-        }
+        let side = referee.position.sideToMove
+        let seat = side == .white ? white : black
+        noteReply(side: side, name: seat.name, text: text)
         let intent = ChatParser.moveIntent(from: text)
         let submission = referee.submit(rawMove: intent?.move ?? text, taunt: intent?.taunt ?? "")
         switch submission {
         case .accepted(let move, let end):
             lastRejection = nil
+            retryCount = 0
             boardVersion += 1
             scene.animate(
                 move: move.move,
@@ -167,24 +191,26 @@ public final class MatchEngine {
             if animationDuration > 0 {
                 animatingUntil = clock + animationDuration
                 phase = "animating"
-                syncBlocked()
             }
             picture.taunt = move.taunt
             archive.record(move: move, clock: clock)
             refreshPicture()
-            let commentary = await hostText(Prompts.moveCommentary(fen: referee.position.fen, san: move.san), trackBoard: true)
-            await speak(commentary, kind: .move)
             if let end {
                 await finishGame(end)
             } else {
+                let commentary = await hostText(Prompts.moveCommentary(fen: referee.position.fen, san: move.san), trackBoard: true)
+                guard !stopped else { return }
+                await speak(commentary, kind: .move)
                 beginThink()
             }
         case .rejected(let reason, _):
+            if let playerLogID { modelLog?.rejectMove(playerLogID, reason: reason, secrets: [seat.apiKey]) }
             lastRejection = reason
             beginThink()
         case .resigned(let end):
-            let loser = end.winner?.opposite ?? referee.position.sideToMove
-            await speak(await hostText(Prompts.resignation(side: loser), trackBoard: false), kind: .resignation)
+            if let playerLogID {
+                modelLog?.rejectMove(playerLogID, reason: "Три недопустимых ответа подряд; засчитано поражение.", secrets: [seat.apiKey])
+            }
             await finishGame(end)
         case .ignored:
             break
@@ -192,7 +218,7 @@ public final class MatchEngine {
     }
 
     private func stall(generation: Int, error: ChatError) async {
-        guard generation == thinkGeneration else { return }
+        guard !stopped, generation == thinkGeneration else { return }
         thinkTask = nil
         waitEpoch += 1
         paused = true
@@ -200,10 +226,12 @@ public final class MatchEngine {
         scene.setThinking(nil)
         let side = referee.position.sideToMove
         let seat = side == .white ? white : black
-        pauseReason = "\(seat.name): \(error.userMessage)"
+        retryCount += 1
+        let delay = min(60.0, 3 * pow(2, Double(min(retryCount - 1, 5))))
+        retryAt = clock + delay
+        pauseReason = "\(seat.name): \(error.userMessage) " + language.text("Автоповтор через \(Int(delay)) с.", "Retrying in \(Int(delay)) s.")
+        picture.line = language.text("\(seat.name): повторяем запрос хода…", "\(seat.name): retrying the move request…")
         refreshPicture()
-        await speak(await hostText(Prompts.stall(side: side), trackBoard: false), kind: .stall)
-        refreshPicture(line: picture.line)
     }
 
     private func maybeWaitLine() {
@@ -211,54 +239,19 @@ public final class MatchEngine {
         waitSpoken = true
         let epoch = waitEpoch
         let side = referee.position.sideToMove
-        Task { [weak self] in
+        let taskID = UUID()
+        let task = Task { [weak self] in
             guard let self else { return }
+            defer { self.auxiliaryTasks.removeValue(forKey: taskID) }
             let text = await self.hostText(Prompts.waiting(side: side), trackBoard: false)
             guard epoch == self.waitEpoch, self.phase == "thinking" else { return }
             await self.speak(text, kind: .wait)
         }
+        auxiliaryTasks[taskID] = task
     }
 
     private func handle(_ cue: ChronicleDirector.Cue) async {
         switch cue {
-        case .prepare:
-            let previous = speech.filter { $0.kind == .chronicle }.map(\.text)
-            let moves = referee.accepted.map(\.san)
-            Task { [weak self] in
-                guard let self else { return }
-                let text = await self.hostText(Prompts.chronicle(moves: moves, previous: previous), trackBoard: false)
-                self.chronicleText = text
-                if self.chronicleActive, !self.chronicleVoiceSent {
-                    self.chronicleVoiceSent = true
-                    await self.speak(text, kind: .chronicle)
-                }
-            }
-        case .startChronicle:
-            phase = "chronicle"
-            chronicleVisuals += 1
-            chronicleVoiceSent = false
-            let moves = referee.accepted.map(\.move)
-            let sides = moves.indices.map { $0.isMultiple(of: 2) ? Side.white : Side.black }
-            scene.layChronicle(moves: moves, sides: sides)
-            refreshPicture(banner: "THE STORY SO FAR")
-            if let chronicleText {
-                chronicleVoiceSent = true
-                await speak(chronicleText, kind: .chronicle)
-            }
-        case .startVoice(let text):
-            guard !chronicleVoiceSent else { return }
-            chronicleVoiceSent = true
-            await speak(text, kind: .chronicle)
-        case .endChronicle:
-            picture.banner = nil
-            if let deferred = deferredMove {
-                deferredMove = nil
-                await ingest(deferred.0, generation: deferred.1, record: false)
-            } else if referee.end == nil, !paused, thinkTask == nil {
-                phase = "thinking"
-                beginThink()
-            }
-            refreshPicture()
         case .startFinal:
             guard !sawFinal else { return }
             sawFinal = true
@@ -267,10 +260,16 @@ public final class MatchEngine {
             let moves = referee.accepted.map(\.move)
             let sides = moves.indices.map { $0.isMultiple(of: 2) ? Side.white : Side.black }
             scene.layChronicle(moves: moves, sides: sides)
-            let title = referee.end?.title ?? "GAME OVER"
+            let title = referee.end.map { language.result($0, white: white.name, black: black.name) } ?? "GAME OVER"
             refreshPicture(banner: title)
-            let line = await hostText(Prompts.final(title: title, moves: referee.accepted.map(\.san)), trackBoard: false)
-            await speak(line, kind: .final)
+            let taskID = UUID()
+            let task = Task { [weak self] in
+                guard let self else { return }
+                defer { self.auxiliaryTasks.removeValue(forKey: taskID) }
+                let line = await self.hostText(Prompts.final(title: title, moves: self.referee.accepted.map(\.san)), trackBoard: false)
+                await self.speak(line, kind: .final)
+            }
+            auxiliaryTasks[taskID] = task
         case .endFinal:
             phase = "finished"
             refreshPicture()
@@ -282,19 +281,19 @@ public final class MatchEngine {
         thinkTask = nil
         director.gameOver = true
         archive.markResult(end)
-        phase = "finished"
+        onGameEnded?(end)
+        phase = "final"
         await advance(to: clock)
     }
 
     private func speak(_ text: String, kind: SpeechKind) async {
         let spoken = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !spoken.isEmpty else { return }
-        speaking = true
-        syncBlocked()
-        phase = kind == .move || kind == .wait ? phase : phase
-        let samples = await voice.speak(spoken, kind: kind)
-        speaking = false
-        syncBlocked()
+        guard !stopped, !Task.isCancelled, !spoken.isEmpty else { return }
+        voice.language = language
+        let samples = (try? await RequestDeadline.run(seconds: 20) { [voice] in
+            await voice.speak(spoken, kind: kind)
+        }) ?? []
+        guard !stopped, !Task.isCancelled else { return }
         let line = SpokenLine(kind: kind, text: spoken, boardVersion: boardVersion, clock: clock)
         speech.append(line)
         if archive.isOpen, kind != .tone {
@@ -303,13 +302,6 @@ public final class MatchEngine {
         }
         picture.line = spoken
         refreshPicture()
-        if kind != .chronicle && kind != .final {
-            syncBlocked()
-            let cues = director.advance(to: clock, voiceText: chronicleText)
-            for cue in cues {
-                await handle(cue)
-            }
-        }
     }
 
     private func hostText(_ prompt: (system: String, user: String), trackBoard: Bool) async -> String {
@@ -320,12 +312,12 @@ public final class MatchEngine {
             url: host.completionsURL,
             apiKey: host.apiKey,
             model: host.model,
-            system: prompt.system,
+            system: language.prompt(prompt.system),
             user: prompt.user
         )
         let text: String
         do {
-            text = try await transport.complete(call)
+            text = try await complete(call, context: trackBoard ? "Ведущий · комментарий хода" : "Ведущий", timeout: hostTimeout)
         } catch {
             text = fallback(for: prompt.user)
         }
@@ -333,6 +325,22 @@ public final class MatchEngine {
             return limitWords(text)
         }
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func complete(_ call: ChatCall, context: String, timeout: TimeInterval, player: Bool = false) async throws -> String {
+        let log = modelLog
+        let id = log?.begin(call, context: context, endpoint: transport.requestURL(for: call))
+        if player { playerLogID = id }
+        do {
+            let text = try await RequestDeadline.run(seconds: timeout) { [transport] in
+                try await transport.complete(call)
+            }
+            if let id { log?.succeed(id, response: text, secrets: [call.apiKey]) }
+            return text
+        } catch {
+            if let id { log?.fail(id, error: error) }
+            throw error
+        }
     }
 
     private func playerCall() -> ChatCall {
@@ -345,12 +353,19 @@ public final class MatchEngine {
             history: referee.accepted.map(\.san),
             rejection: lastRejection
         )
-        return ChatCall(url: seat.completionsURL, apiKey: seat.apiKey, model: seat.model, system: prompt.system, user: prompt.user)
+        return ChatCall(url: seat.completionsURL, apiKey: seat.apiKey, model: seat.model, system: language.prompt(prompt.system), user: prompt.user)
     }
 
     private func fallback(for user: String) -> String {
+        if language == .russian {
+            if user.contains("resigns") { return "Игрок сдаётся. Партия завершена." }
+            if user.contains("stalled") { return "Повторяем запрос. Партия продолжится автоматически." }
+            if user.contains("still thinking") { return "Игрок обдумывает следующий ход." }
+            if user.contains("Result:") { return referee.end.map { language.result($0, white: white.name, black: black.name) } ?? "Партия завершена." }
+            return "Ход сделан. Игра продолжается."
+        }
         if user.contains("resigns") { return "That side resigns. The board accepts." }
-        if user.contains("stalled") { return "That player has stalled. The match is paused." }
+        if user.contains("stalled") { return "Retrying the request. The match will continue automatically." }
         if user.contains("still thinking") { return "Still thinking. The clock keeps its own counsel." }
         if user.contains("Result:") { return "The game is over, and the pieces look relieved." }
         return "The position has changed, and it has opinions about it."
@@ -373,15 +388,6 @@ public final class MatchEngine {
             thinkingSide: phase == "thinking" && thinkTask != nil ? referee.position.sideToMove : nil,
             pausedPlayer: paused ? (referee.position.sideToMove == .white ? white.name : black.name) : nil
         )
-    }
-
-    private func syncBlocked() {
-        director.blocked = speaking || animatingUntil != nil || scene.isAnimating
-    }
-
-    private var chronicleActive: Bool {
-        if case .chronicle = director.phase { return true }
-        return false
     }
 
     private var finalActive: Bool {

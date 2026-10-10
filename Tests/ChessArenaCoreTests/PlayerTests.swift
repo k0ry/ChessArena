@@ -123,7 +123,7 @@ final class PlayerTests: XCTestCase {
         try await waitUntil { unreadable.moveRequestCount >= 2 }
         XCTAssertFalse(unreadable.paused)
         XCTAssertEqual(unreadable.referee.position.fen, Position.standard().fen)
-        try await waitUntil(timeout: 6) { unreadable.speech.contains { $0.kind == .resignation } }
+        try await waitUntil(timeout: 6) { unreadable.speech.contains { $0.kind == .final } }
 
         gate.mode = .dropFirstPlayer
         seen.clear()
@@ -132,7 +132,7 @@ final class PlayerTests: XCTestCase {
         try await waitUntil { dropped.paused }
         XCTAssertEqual(dropped.referee.position.fen, Position.standard().fen)
         let requests = dropped.moveRequestCount
-        dropped.resume()
+        await dropped.advance(to: 3)
         try await waitUntil {
             dropped.moveRequestCount > requests &&
                 seen.values.map { requestText($0.bodyText) }.filter(isOpeningWhite).count >= 2

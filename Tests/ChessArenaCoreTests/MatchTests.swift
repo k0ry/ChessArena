@@ -4,7 +4,43 @@ import XCTest
 
 @MainActor
 final class MatchTests: XCTestCase {
-    func testBlackAPIFailureShowsPauseBeforeHostRespondsAndRetriesSamePosition() async throws {
+    func testEveryProviderPairRoutesMovesAndKeepsHostOnGrok() async throws {
+        for whiteProvider in NeuralProvider.allCases {
+            for blackProvider in NeuralProvider.allCases {
+                var white = PlayerConfiguration(provider: whiteProvider)
+                var black = PlayerConfiguration(provider: blackProvider)
+                white.model = "white-selected-model"
+                black.model = "black-selected-model"
+                let rig = try makeRig(whitePlayer: white, blackPlayer: black)
+                try await rig.engine.start(at: 0)
+                try await waitUntil { rig.chat.calls.contains { $0.system.contains("You are White") } }
+                let opening = try XCTUnwrap(rig.chat.calls.first { $0.system.contains("You are White") })
+                XCTAssertEqual(opening.url.host, whiteProvider == .grok ? "api.x.ai" : "api.openai.com")
+                XCTAssertEqual(opening.apiKey, whiteProvider == .grok ? "grok-key" : "openai-key")
+                XCTAssertEqual(opening.model, "white-selected-model")
+                rig.chat.fulfill(where: { $0.system.contains("You are White") }, body: jsonMove("e2e4", "Go."))
+                try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
+                let host = try XCTUnwrap(rig.chat.calls.first { $0.system.contains("already on the board") })
+                XCTAssertEqual(host.url.host, "api.x.ai")
+                XCTAssertEqual(host.model, ModelCatalog.grokModel)
+                rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "White starts.")
+                try await waitUntil { rig.chat.calls.contains { $0.system.contains("You are Black") } }
+                let reply = try XCTUnwrap(rig.chat.calls.first { $0.system.contains("You are Black") })
+                XCTAssertEqual(reply.url.host, blackProvider == .grok ? "api.x.ai" : "api.openai.com")
+                XCTAssertEqual(reply.apiKey, blackProvider == .grok ? "grok-key" : "openai-key")
+                XCTAssertEqual(reply.model, "black-selected-model")
+                XCTAssertEqual(rig.engine.picture.whiteName, whiteProvider.rawValue)
+                XCTAssertEqual(rig.engine.picture.blackName, blackProvider.rawValue)
+                XCTAssertEqual(rig.engine.picture.replies.first?.name, whiteProvider.rawValue)
+                rig.chat.fail(where: { $0.system.contains("You are Black") })
+                try await waitUntil { rig.engine.paused }
+                rig.engine.stop()
+                try await rig.engine.closeArchive()
+            }
+        }
+    }
+
+    func testBlackAPIFailureRetriesAutomaticallyWithSamePosition() async throws {
         let rig = try makeRig()
         try await rig.engine.start(at: 0)
         try await waitUntil { rig.chat.calls.contains { $0.system.contains("JSON") } }
@@ -23,7 +59,9 @@ final class MatchTests: XCTestCase {
         XCTAssertEqual(rig.engine.referee.accepted.count, 1)
         rig.engine.black.apiKey = "replacement-key"
         rig.engine.black.model = "replacement-model"
-        rig.engine.resume()
+        await rig.engine.advance(to: 2)
+        XCTAssertEqual(rig.engine.moveRequestCount, 2)
+        await rig.engine.advance(to: 3)
         try await waitUntil { rig.chat.calls.filter { $0.system.contains("You are Black") }.count == 2 }
         let retry = try XCTUnwrap(rig.chat.calls.last { $0.system.contains("You are Black") })
         XCTAssertTrue(retry.user.contains(fen))
@@ -93,14 +131,14 @@ final class MatchTests: XCTestCase {
         try await rig.engine.start(at: 0)
         try await waitUntil { rig.chat.calls.contains { $0.system.contains("JSON") } }
         rig.chat.fail(where: { $0.system.contains("JSON") })
-        try await waitUntil { rig.chat.calls.contains { $0.user.contains("stalled") } }
-        rig.chat.fulfill(where: { $0.user.contains("stalled") }, body: "White has stalled. The match waits.")
-        try await waitUntil { rig.engine.speech.contains { $0.kind == .stall } }
+        try await waitUntil { rig.engine.paused }
+        XCTAssertEqual(rig.engine.retryAt, 3)
         XCTAssertTrue(rig.engine.paused)
         XCTAssertEqual(rig.engine.referee.position.fen, Position.standard().fen)
         let requests = rig.engine.moveRequestCount
-        rig.engine.resume()
+        await rig.engine.advance(to: 3)
         try await waitUntil { rig.engine.moveRequestCount == requests + 1 }
+        rig.engine.stop()
         XCTAssertEqual(rig.engine.referee.position.fen, Position.standard().fen)
 
         let resign = try makeRig()
@@ -111,36 +149,38 @@ final class MatchTests: XCTestCase {
             resign.chat.fulfill(where: { $0.system.contains("JSON") }, body: "not json")
             try await Task.sleep(nanoseconds: 30_000_000)
         }
-        try await waitUntil { resign.chat.calls.contains { $0.user.contains("resigns") } }
-        resign.chat.fulfill(where: { $0.user.contains("resigns") }, body: "White resigns, which is a kind of plan.")
-        try await waitUntil { resign.engine.speech.contains { $0.kind == .resignation } }
+        try await waitUntil { resign.chat.calls.contains { $0.user.contains("Result:") } }
+        resign.chat.fulfill(where: { $0.user.contains("Result:") }, body: "ChatGPT wins.")
+        try await waitUntil { resign.engine.speech.contains { $0.kind == .final } }
+        XCTAssertEqual(resign.engine.picture.banner, "ChatGPT WINS")
         XCTAssertEqual(resign.engine.referee.end, .resignation(loser: .white))
     }
 
-    func testChronicleFreezesMovesAndSpeaksWhenTheLineArrives() async throws {
+    func testMovesContinueAcrossFiveMinuteMarksWithoutRecaps() async throws {
         let rig = try makeRig()
-        rig.engine.animationDuration = 20
+        rig.engine.animationDuration = 1.2
         try await rig.engine.start(at: 0)
-        try await waitUntil { rig.chat.calls.contains { $0.system.contains("JSON") } }
-        await rig.engine.advance(to: 290)
-        rig.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove("e2e4", "Late."))
-        try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
-        rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "A single step, heavily narrated.")
-        try await waitUntil { rig.engine.speech.contains { $0.kind == .move } }
-        let before = rig.engine.moveRequestCount
-        await rig.engine.advance(to: 300)
-        XCTAssertEqual(rig.engine.chronicleVisuals, 0)
-        await rig.engine.advance(to: 310)
-        try await waitUntil { rig.engine.chronicleVisuals == 1 }
-        let during = rig.engine.moveRequestCount
-        await rig.engine.advance(to: 320)
-        XCTAssertEqual(rig.engine.moveRequestCount, during)
-        XCTAssertGreaterThanOrEqual(during, before)
-        try await waitUntil { rig.chat.calls.contains { $0.system.contains("at most 35") } }
-        XCTAssertEqual(rig.engine.speech.filter { $0.kind == .chronicle }.count, 0)
-        rig.chat.fulfill(where: { $0.system.contains("at most 35") }, body: "One move in five minutes, and White calls it development.")
-        try await waitUntil { rig.engine.speech.contains { $0.kind == .chronicle } }
-        XCTAssertLessThanOrEqual(rig.engine.speech.first { $0.kind == .chronicle }!.text.split(separator: " ").count, 45)
+        let moves = ["e2e4", "e7e5", "g1f3"]
+        for (index, move) in moves.enumerated() {
+            let mark = Double(index + 1) * 300
+            try await waitUntil { rig.chat.calls.filter { $0.system.contains("JSON") }.count == index + 1 }
+            await rig.engine.advance(to: mark - 40)
+            await rig.engine.advance(to: mark)
+            rig.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove(move, "Go."))
+            try await waitUntil { rig.engine.referee.accepted.count == index + 1 }
+            try await waitUntil { rig.chat.calls.filter { $0.system.contains("already on the board") }.count == index + 1 }
+            rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "The game continues.")
+            try await waitUntil { rig.engine.moveRequestCount == index + 2 }
+            await rig.engine.advance(to: mark + 2)
+            XCTAssertEqual(rig.engine.director.phase, .live)
+            XCTAssertEqual(rig.engine.picture.thinkingSide, rig.engine.referee.position.sideToMove)
+            XCTAssertNil(rig.engine.picture.banner)
+            XCTAssertFalse(rig.engine.paused)
+        }
+        XCTAssertFalse(rig.chat.calls.contains { $0.system.contains("at most 35") })
+        XCTAssertFalse(rig.engine.speech.contains { $0.kind == .chronicle })
+        XCTAssertNotNil(rig.engine.scene.node(named: "piece-knight-f3"))
+        try await rig.engine.closeArchive()
     }
 
     func testTwoMoveMatchWritesBoardSpeechPGNAndVideo() async throws {
@@ -179,13 +219,97 @@ final class MatchTests: XCTestCase {
         XCTAssertEqual(size.height, 1080, accuracy: 1)
     }
 
-    private func makeRig() throws -> Rig {
+    func testHungRequestTimesOutAndLateReplyCannotMakeAMove() async throws {
+        let rig = try makeRig()
+        rig.engine.requestTimeout = 0.03
+        let log = ModelLog()
+        rig.engine.modelLog = log
+        try await rig.engine.start(at: 0)
+        try await waitUntil { rig.engine.paused }
+        XCTAssertEqual(rig.engine.retryAt, 3)
+        XCTAssertEqual(log.entries.first?.status, .failed)
+        XCTAssertEqual(log.entries.first?.error, ChatError.timeout.userMessage)
+        let failedID = log.entries.first?.id
+        rig.engine.requestTimeout = RequestTimeouts.player
+        await rig.engine.advance(to: 3)
+        try await waitUntil { rig.chat.calls.filter { $0.system.contains("JSON") }.count == 2 }
+        rig.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove("d2d4", "stale"))
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(rig.engine.boardVersion, 0)
+        rig.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove("e2e4", "current"))
+        try await waitUntil { rig.engine.boardVersion == 1 }
+        XCTAssertEqual(rig.engine.referee.accepted.first?.move.uci, "e2e4")
+        XCTAssertTrue(log.entries.contains { $0.response?.contains("e2e4") == true && $0.status == .received })
+        XCTAssertEqual(log.entries.first { $0.id == failedID }?.status, .failed)
+        XCTAssertFalse(log.entries.contains { $0.response?.contains("stale") == true })
+        rig.engine.stop()
+        try await rig.engine.closeArchive()
+    }
+
+    func testHostTimeoutUsesSelectedLanguageAndGameContinues() async throws {
+        for language in BroadcastLanguage.allCases {
+            let rig = try makeRig()
+            rig.engine.language = language
+            rig.engine.hostTimeout = 0.03
+            try await rig.engine.start(at: 0)
+            try await waitUntil { rig.chat.calls.contains { $0.system.contains("JSON") } }
+            XCTAssertTrue(rig.chat.calls[0].system.contains(language == .russian ? "Russian" : "English"))
+            rig.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove("e2e4", ""))
+            try await waitUntil { rig.engine.moveRequestCount == 2 }
+            XCTAssertEqual(rig.engine.speech.last?.text, language == .russian ? "Ход сделан. Игра продолжается." : "The position has changed, and it has opinions about it.")
+            XCTAssertEqual(rig.engine.voice.language, language)
+            rig.engine.stop()
+            try await rig.engine.closeArchive()
+        }
+    }
+
+    func testStopCancelsPendingMoveAndAutomaticRetry() async throws {
+        let rig = try makeRig()
+        try await rig.engine.start(at: 0)
+        try await waitUntil { rig.chat.calls.contains { $0.system.contains("JSON") } }
+        rig.engine.stop()
+        rig.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove("e2e4", "late"))
+        await rig.engine.advance(to: 300)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(rig.engine.boardVersion, 0)
+        XCTAssertEqual(rig.engine.moveRequestCount, 1)
+        XCTAssertNil(rig.engine.retryAt)
+        try await rig.engine.closeArchive()
+    }
+
+    func testMatePublishesResultImmediatelyEvenIfFinalHostNeverAnswers() async throws {
+        let rig = try makeRig()
+        var results: [GameEnd] = []
+        rig.engine.onGameEnded = { results.append($0) }
+        rig.engine.hostTimeout = 0.03
+        try await rig.engine.start(at: 0)
+        for (index, move) in ["f2f3", "e7e5", "g2g4", "d8h4"].enumerated() {
+            try await waitUntil { rig.chat.calls.filter { $0.system.contains("JSON") }.count == index + 1 }
+            rig.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove(move, ""))
+        }
+        try await waitUntil { rig.engine.finalCards == 1 }
+        XCTAssertEqual(results, [.checkmate(winner: .black)])
+        XCTAssertEqual(rig.engine.picture.banner, "ChatGPT WINS")
+        await rig.engine.advance(to: 29)
+        XCTAssertEqual(rig.engine.phase, "final")
+        await rig.engine.advance(to: 30)
+        XCTAssertEqual(rig.engine.phase, "finished")
+        XCTAssertEqual(results.count, 1)
+        rig.engine.stop()
+        try await rig.engine.closeArchive()
+    }
+
+    private func makeRig(
+        whitePlayer: PlayerConfiguration? = nil, blackPlayer: PlayerConfiguration? = nil
+    ) throws -> Rig {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let archive = MatchArchive(directory: directory, whiteName: "Grok", blackName: "ChatGPT")
+        let archive = MatchArchive(directory: directory,
+                                   whiteName: whitePlayer?.provider.rawValue ?? "Grok",
+                                   blackName: blackPlayer?.provider.rawValue ?? "ChatGPT")
         let chat = ScriptedChat()
         let secret = "CHESSARENA-SECRET-KEY-9f3c2a7b"
-        let white = Seat.defaultWhite(apiKey: secret)
-        let black = Seat.defaultBlack(apiKey: secret)
+        let white = whitePlayer?.seat(side: .white, grokKey: "grok-key", chatKey: "openai-key") ?? Seat.defaultWhite(apiKey: secret)
+        let black = blackPlayer?.seat(side: .black, grokKey: "grok-key", chatKey: "openai-key") ?? Seat.defaultBlack(apiKey: secret)
         let host = Seat(name: "Host", baseURL: ModelCatalog.grokAPI, model: ModelCatalog.grokModel, apiKey: secret, side: .white)
         let engine = MatchEngine(
             scene: BoardScene(),

@@ -10,13 +10,20 @@ public final class ArenaChatTransport: ChatTransport {
         self.connection = connection; self.api = api; self.network = network
     }
 
+    public func requestURL(for call: ChatCall) -> URL {
+        if call.url.host == "api.openai.com", connection != nil {
+            return URL(string: "https://api.openai.com/v1/responses")!
+        }
+        return api.requestURL(for: call)
+    }
+
     public func complete(_ call: ChatCall) async throws -> String {
         guard call.url.host == "api.openai.com", let connection else { return try await api.complete(call) }
         let token: String
         do { token = try await connection.accessToken() }
         catch { throw ChatError.http(status: 401, reason: .authentication) }
         var request = URLRequest(url: URL(string: "https://api.openai.com/v1/responses")!)
-        request.httpMethod = "POST"; request.timeoutInterval = 90
+        request.httpMethod = "POST"; request.timeoutInterval = RequestTimeouts.player
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")

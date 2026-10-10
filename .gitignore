@@ -9,6 +9,8 @@ xcuserdata/
 *.hmap
 
 ## App packaging
+ChessArena.app/
+.DS_Store
 *.ipa
 *.dSYM.zip
 *.dSYM

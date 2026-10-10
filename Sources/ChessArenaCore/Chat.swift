@@ -1,5 +1,9 @@
 import Foundation
 
+public enum RequestTimeouts {
+    public static let player: TimeInterval = 10 * 60
+}
+
 public enum ModelCatalog {
     /// docs.x.ai models, October 2026: Grok 4.7 is the chat model.
     public static let grokModel = "grok-4.7"
@@ -108,7 +112,12 @@ public enum APIErrorReason: String, Equatable {
 }
 
 public protocol ChatTransport: AnyObject {
+    func requestURL(for call: ChatCall) -> URL
     func complete(_ call: ChatCall) async throws -> String
+}
+
+public extension ChatTransport {
+    func requestURL(for call: ChatCall) -> URL { call.url }
 }
 
 public enum ChatParser {
@@ -154,7 +163,14 @@ public enum Prompts {
         history: [String],
         rejection: String?
     ) -> (system: String, user: String) {
-        let system = "You are \(side == .white ? "White" : "Black") in a chess broadcast. Reply with JSON only: {\"move\":\"<uci>\",\"taunt\":\"<one short dry English sentence>\"}."
+        let system = """
+        You are \(side == .white ? "White" : "Black") in a chess broadcast. Play as a professional chess player whose priority is the strongest practical result: win when possible and defend resourcefully when worse.
+        Use the supplied FEN as the authoritative current position and the move history to understand the game. Build a coherent plan for the coming moves rather than choosing an isolated attractive move.
+        Before choosing, identify the opponent's immediate threats, checks, captures and mating ideas. Compare promising candidate moves by calculating several moves ahead, considering the opponent's strongest legal replies rather than assuming mistakes. Verify imagined continuations against the resulting positions.
+        Balance concrete tactics with king safety, material, piece activity, development, central control, pawn structure and endgame prospects. Adapt your plan as the position changes. Before committing, check that your move does not allow an avoidable mate, lose material without sufficient compensation or miss a stronger forcing continuation.
+        Choose exactly one move from the supplied Legal UCI list. This list applies to the current position only. If an attempt was rejected, correct it using the current FEN and legal moves.
+        Keep your analysis private. The short taunt is for the broadcast and must not replace careful move selection. Reply with JSON only, without markdown or analysis: {"move":"<uci>","taunt":"<one short dry English sentence>"}.
+        """
         var user = "FEN: \(fen)\nLegal UCI: \(legal.joined(separator: " "))\nHistory: \(history.joined(separator: " "))"
         if let rejection {
             user += "\nThe previous attempt was illegal. \(rejection) Choose a legal UCI."
@@ -209,7 +225,7 @@ public final class URLSessionChatTransport: ChatTransport {
     public var session: URLSession
     public var timeout: TimeInterval
 
-    public init(session: URLSession = .shared, timeout: TimeInterval = 90) {
+    public init(session: URLSession = .shared, timeout: TimeInterval = RequestTimeouts.player) {
         self.session = session
         self.timeout = timeout
     }
