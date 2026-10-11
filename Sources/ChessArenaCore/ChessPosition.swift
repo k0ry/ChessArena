@@ -8,7 +8,7 @@ public enum Side: String, Equatable, Codable, Sendable {
     public var fen: String { self == .white ? "w" : "b" }
 }
 
-public enum PieceKind: Equatable, Sendable {
+public enum PieceKind: Equatable, Sendable, Codable {
     case pawn, knight, bishop, rook, queen, king
 
     var fen: Character {
@@ -56,7 +56,7 @@ public struct Piece: Equatable, Sendable {
     }
 }
 
-public struct Square: Equatable, Hashable, Sendable {
+public struct Square: Equatable, Hashable, Sendable, Codable {
     public var file: Int
     public var rank: Int
 
@@ -88,7 +88,7 @@ public struct Square: Equatable, Hashable, Sendable {
     }
 }
 
-public struct ChessMove: Equatable, Hashable, Sendable {
+public struct ChessMove: Equatable, Hashable, Sendable, Codable {
     public var from: Square
     public var to: Square
     public var promotion: PieceKind?
@@ -547,7 +547,7 @@ public struct Position: Equatable, Sendable {
     }
 }
 
-public enum GameEnd: Equatable, Sendable {
+public enum GameEnd: Equatable, Sendable, Codable {
     case checkmate(winner: Side)
     case stalemate
     case resignation(loser: Side)
@@ -572,7 +572,7 @@ public enum GameEnd: Equatable, Sendable {
     }
 }
 
-public struct AcceptedMove: Equatable, Sendable {
+public struct AcceptedMove: Equatable, Sendable, Codable {
     public var move: ChessMove
     public var san: String
     public var taunt: String
@@ -586,7 +586,7 @@ public enum Submission: Equatable, Sendable {
     case ignored
 }
 
-public struct Referee: Sendable {
+public struct Referee: Sendable, Codable, Equatable {
     public private(set) var position: Position
     public private(set) var accepted: [AcceptedMove] = []
     public private(set) var end: GameEnd?
@@ -641,5 +641,23 @@ public struct Referee: Sendable {
         let record = AcceptedMove(move: parsed, san: san, taunt: taunt, fenAfter: position.fen)
         accepted.append(record)
         return .accepted(record, end: gameEnd)
+    }
+}
+
+// FEN retains castling rights, en passant and both move counters.
+extension Position: Codable {
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer()
+        let fen = try value.decode(String.self)
+        guard let position = Position.position(fen: fen), position.halfmove >= 0, position.fullmove >= 1,
+              position.squares.compactMap({ $0 }).filter({ $0.kind == .king && $0.side == .white }).count == 1,
+              position.squares.compactMap({ $0 }).filter({ $0.kind == .king && $0.side == .black }).count == 1 else {
+            throw DecodingError.dataCorruptedError(in: value, debugDescription: "Invalid saved chess position")
+        }
+        self = position
+    }
+    public func encode(to encoder: Encoder) throws {
+        var value = encoder.singleValueContainer()
+        try value.encode(fen)
     }
 }

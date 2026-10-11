@@ -58,6 +58,10 @@ final class ArenaDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         lockedFrame[ObjectIdentifier(window)] = frame.size
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        runtime.shutdown()
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }

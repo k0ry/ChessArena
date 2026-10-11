@@ -5,7 +5,7 @@ public enum StageMetrics {
     public static let height = 1080
 }
 
-public struct ModelReply: Equatable, Sendable, Identifiable {
+public struct ModelReply: Equatable, Sendable, Identifiable, Codable {
     public var id: Int
     public var side: Side
     public var name: String
@@ -19,7 +19,7 @@ public struct ModelReply: Equatable, Sendable, Identifiable {
     }
 }
 
-public struct BroadcastPicture: Equatable, Sendable {
+public struct BroadcastPicture: Equatable, Sendable, Codable {
     public var whiteName: String
     public var blackName: String
     public var clockText: String
@@ -29,6 +29,7 @@ public struct BroadcastPicture: Equatable, Sendable {
     public var replies: [ModelReply]
     public var thinkingSide: Side?
     public var pausedPlayer: String?
+    public var thinkingSelfNotes: String?
 
     public init(
         whiteName: String,
@@ -39,7 +40,8 @@ public struct BroadcastPicture: Equatable, Sendable {
         banner: String?,
         replies: [ModelReply] = [],
         thinkingSide: Side? = nil,
-        pausedPlayer: String? = nil
+        pausedPlayer: String? = nil,
+        thinkingSelfNotes: String? = nil
     ) {
         self.whiteName = whiteName
         self.blackName = blackName
@@ -50,6 +52,7 @@ public struct BroadcastPicture: Equatable, Sendable {
         self.replies = replies
         self.thinkingSide = thinkingSide
         self.pausedPlayer = pausedPlayer
+        self.thinkingSelfNotes = thinkingSelfNotes
     }
 
     public static let empty = BroadcastPicture(
@@ -63,7 +66,7 @@ public struct BroadcastPicture: Equatable, Sendable {
 
     public var broadcastText: String {
         let spoken = replies.map(\.text).joined(separator: "\n")
-        return [whiteName, blackName, clockText, line, taunt, banner ?? "", spoken].joined(separator: "\n")
+        return [whiteName, blackName, clockText, line, taunt, banner ?? "", spoken, thinkingSide == nil ? "" : (thinkingSelfNotes ?? "")].joined(separator: "\n")
     }
 }
 

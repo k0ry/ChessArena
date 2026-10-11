@@ -72,6 +72,9 @@ struct ModelLogView: View {
                             }
                             section("SYSTEM / INSTRUCTIONS", selected.system)
                             section("USER", selected.user)
+                            if let notes = selected.selfNotes, !notes.isEmpty {
+                                section("ЗАМЕТКИ ЭТОГО ИГРОКА · отдельное сообщение", notes)
+                            }
                             if let response = selected.response { section("ОТВЕТ МОДЕЛИ", response) }
                             if let error = selected.error { section("ОШИБКА", error, tint: color(selected.status)) }
                             if selected.status == .pending {

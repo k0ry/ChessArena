@@ -5,12 +5,15 @@ public final class ArenaChatTransport: ChatTransport {
     private let api: ChatTransport
     private let connection: ChatGPTConnection?
     private let network: URLSession
+    private let gemini: GeminiCLI?
 
-    public init(connection: ChatGPTConnection?, api: ChatTransport = URLSessionChatTransport(), network: URLSession = .shared) {
+    public init(connection: ChatGPTConnection?, api: ChatTransport = URLSessionChatTransport(), network: URLSession = .shared, gemini: GeminiCLI? = nil) {
+        self.gemini = gemini
         self.connection = connection; self.api = api; self.network = network
     }
 
     public func requestURL(for call: ChatCall) -> URL {
+        if call.route == .geminiCLI { return URL(string: "local-cli://antigravity")! }
         if call.url.host == "api.openai.com", connection != nil {
             return URL(string: "https://api.openai.com/v1/responses")!
         }
@@ -18,6 +21,10 @@ public final class ArenaChatTransport: ChatTransport {
     }
 
     public func complete(_ call: ChatCall) async throws -> String {
+        if call.route == .geminiCLI {
+            guard let gemini else { throw ChatError.cli(.missing) }
+            return try await gemini.complete(call)
+        }
         guard call.url.host == "api.openai.com", let connection else { return try await api.complete(call) }
         let token: String
         do { token = try await connection.accessToken() }
@@ -29,22 +36,36 @@ public final class ArenaChatTransport: ChatTransport {
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": call.model, "instructions": call.system,
-            "input": [["role": "user", "content": call.user]],
+            "input": call.inputMessages,
             "store": false, "stream": true
         ])
         do {
-            let (bytes, response) = try await network.bytes(for: request)
-            guard let http = response as? HTTPURLResponse else { throw ChatError.transport }
-            if !(200..<300).contains(http.statusCode) {
-                var errorData = Data()
-                for try await byte in bytes { errorData.append(byte); if errorData.count >= 16384 { break } }
-                throw ChatError.http(status: http.statusCode, reason: APIErrorReason.classify(status: http.statusCode, data: errorData))
+            return try await NetworkTrace.track(.responses, request: request) { trace in
+                let (bytes, response) = try await network.bytes(for: request)
+                await trace.response(response)
+                guard let http = response as? HTTPURLResponse else { throw ChatError.transport }
+                if !(200..<300).contains(http.statusCode) {
+                    var errorData = Data()
+                    for try await byte in bytes { errorData.append(byte); if errorData.count >= 16384 { break } }
+                    await trace.payload(bytes: errorData.count)
+                    throw ChatError.http(status: http.statusCode, reason: APIErrorReason.classify(status: http.statusCode, data: errorData))
+                }
+                var parser = ResponsesStream()
+                var received = 0
+                do {
+                    for try await line in bytes.lines {
+                        received += line.utf8.count
+                        if let result = try parser.consume(line) {
+                            await trace.payload(bytes: received)
+                            return result
+                        }
+                    }
+                    throw ChatError.unreadable
+                } catch {
+                    await trace.payload(bytes: received)
+                    throw error
+                }
             }
-            var parser = ResponsesStream()
-            for try await line in bytes.lines {
-                if let result = try parser.consume(line) { return result }
-            }
-            throw ChatError.unreadable
         } catch let error as URLError where error.code == .timedOut { throw ChatError.timeout }
     }
 }

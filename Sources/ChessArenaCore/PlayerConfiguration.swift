@@ -1,19 +1,28 @@
 import Foundation
 
-public enum NeuralProvider: String, CaseIterable, Identifiable, Sendable {
+public enum NeuralProvider: String, CaseIterable, Identifiable, Sendable, Codable {
     case grok = "Grok"
     case chatGPT = "ChatGPT"
+    case gemini = "Gemini"
 
     public var id: String { rawValue }
     public var defaultModel: String {
-        self == .grok ? ModelCatalog.grokModel : ModelCatalog.chatGPTModel
+        switch self {
+        case .grok: return ModelCatalog.grokModel
+        case .chatGPT: return ModelCatalog.chatGPTModel
+        case .gemini: return GeminiCLI.defaultModel
+        }
     }
     public var baseURL: URL {
-        self == .grok ? ModelCatalog.grokAPI : ModelCatalog.openAIAPI
+        switch self {
+        case .grok: return ModelCatalog.grokAPI
+        case .chatGPT: return ModelCatalog.openAIAPI
+        case .gemini: return URL(string: "local-cli://antigravity")!
+        }
     }
 }
 
-public struct PlayerConfiguration: Equatable, Sendable {
+public struct PlayerConfiguration: Equatable, Sendable, Codable {
     public var provider: NeuralProvider {
         didSet {
             if provider != oldValue { model = provider.defaultModel }
@@ -29,7 +38,7 @@ public struct PlayerConfiguration: Equatable, Sendable {
     public func seat(side: Side, grokKey: String, chatKey: String) -> Seat {
         Seat(name: provider.rawValue, baseURL: provider.baseURL,
              model: model.trimmingCharacters(in: .whitespacesAndNewlines),
-             apiKey: (provider == .grok ? grokKey : chatKey).trimmingCharacters(in: .whitespacesAndNewlines),
-             side: side)
+             apiKey: (provider == .gemini ? "" : provider == .grok ? grokKey : chatKey).trimmingCharacters(in: .whitespacesAndNewlines),
+             side: side, route: provider == .gemini ? .geminiCLI : .http)
     }
 }

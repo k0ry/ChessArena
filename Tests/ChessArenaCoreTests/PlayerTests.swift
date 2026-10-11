@@ -4,6 +4,35 @@ import XCTest
 @testable import ChessArenaCore
 
 final class PlayerTests: XCTestCase {
+    func testSelfNotesParsingAndSeparateWireMessage() async throws {
+        let legacy = try XCTUnwrap(ChatParser.moveIntent(from: #"{"move":"e2e4","taunt":"Go."}"#))
+        XCTAssertNil(legacy.selfNotes)
+        let notes = "Develop Nf3, then castle if safe."
+        let intent = try XCTUnwrap(ChatParser.moveIntent(from: #"{"move":"e2e4","self_notes":"Develop Nf3, then castle if safe."}"#))
+        XCTAssertEqual(intent.selfNotes, notes)
+        XCTAssertEqual(ChatParser.moveIntent(from: #"{"move":"e2e4","self_notes":""}"#)?.selfNotes, "")
+
+        let server = MiniHTTPServer()
+        let seen = SeenRequest()
+        server.handler = { incoming in
+            seen.store(incoming)
+            return MiniHTTPServer.Outgoing(status: 200, body: chatEnvelope(#"{"move":"e2e4"}"#))
+        }
+        try server.start()
+        defer { server.stop() }
+        let call = ChatCall(url: URL(string: "http://127.0.0.1:\(server.port)/chat/completions")!,
+                            apiKey: "test", model: "test", system: "system", user: "FEN: current", selfNotes: notes)
+        _ = try await URLSessionChatTransport(timeout: 3).complete(call)
+        let incoming = try XCTUnwrap(seen.value)
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(incoming.bodyText.utf8)) as? [String: Any])
+        let messages = try XCTUnwrap(payload["messages"] as? [[String: String]])
+        XCTAssertEqual(messages.count, 3)
+        XCTAssertEqual(messages[1], ["role": "user", "content": "FEN: current"])
+        XCTAssertEqual(messages[2]["role"], "user")
+        XCTAssertTrue(messages[2]["content"]?.hasSuffix(notes) == true)
+        XCTAssertEqual(Array(messages.dropFirst()), call.inputMessages)
+    }
+
     func testHTTPFailuresKeepSafeActionableReasons() async throws {
         let fixtures: [(Int, String, APIErrorReason)] = [
             (401, "invalid_api_key", .authentication),

@@ -21,10 +21,15 @@ public enum ArenaPalette {
 public final class BoardScene {
     public let scene = SCNScene()
     public let cameraNode = SCNNode()
+    public private(set) var isCameraManual = false
+    private var cameraYaw: Float = 0
+    private var cameraPitch: Float = 0
+    private var cameraDistance: Float = 18
     public private(set) var isAnimating = false
     public let boardNode = SCNNode()
     private var pieceNodes: [String: SCNNode] = [:]
     private var displayedPosition = Position.standard()
+    private let captureEffects = SCNNode()
     private lazy var metalDevice = MTLCreateSystemDefaultDevice()
     private lazy var renderQueue = metalDevice?.makeCommandQueue()
     private lazy var renderer: SCNRenderer = {
@@ -38,6 +43,8 @@ public final class BoardScene {
     public init() {
         scene.background.contents = NSColor(calibratedWhite: 0.02, alpha: 1)
         scene.rootNode.addChildNode(boardNode)
+        captureEffects.name = "capture-effects"
+        scene.rootNode.addChildNode(captureEffects)
         buildSquares()
         buildCamera()
         buildStage()
@@ -53,7 +60,61 @@ public final class BoardScene {
     }
 
     public func applyCamera(at time: TimeInterval) {
+        guard !isCameraManual else { return }
         cameraNode.position = cameraPosition(at: time)
+        cameraNode.look(at: SCNVector3(0, 0, 0))
+    }
+
+    public var onCameraChanged: (() -> Void)?
+    public var cameraCheckpoint: CameraCheckpoint {
+        CameraCheckpoint(manual: isCameraManual, yaw: cameraYaw, pitch: cameraPitch, distance: cameraDistance)
+    }
+    public func restoreCamera(_ saved: CameraCheckpoint) {
+        guard saved.yaw.isFinite, saved.pitch.isFinite, saved.distance.isFinite else { return }
+        isCameraManual = saved.manual
+        cameraYaw = saved.yaw.truncatingRemainder(dividingBy: 2 * .pi)
+        cameraPitch = min(.pi * 0.47, max(.pi / 12, saved.pitch))
+        cameraDistance = min(45, max(9, saved.distance))
+        if isCameraManual { updateManualCamera() } else { applyCamera(at: 0) }
+    }
+
+    public func orbitCamera(yaw: Float, pitch: Float) {
+        guard yaw.isFinite, pitch.isFinite else { return }
+        beginManualCamera()
+        cameraYaw = (cameraYaw + yaw).truncatingRemainder(dividingBy: 2 * .pi)
+        cameraPitch = min(.pi * 0.47, max(.pi / 12, cameraPitch + pitch))
+        updateManualCamera()
+        onCameraChanged?()
+    }
+
+    public func zoomCamera(scale: Float) {
+        guard scale.isFinite, scale > 0 else { return }
+        beginManualCamera()
+        cameraDistance = min(45, max(9, cameraDistance * scale))
+        updateManualCamera()
+        onCameraChanged?()
+    }
+
+    public func resetCamera() {
+        isCameraManual = false
+        applyCamera(at: 0)
+        onCameraChanged?()
+    }
+
+    private func beginManualCamera() {
+        guard !isCameraManual else { return }
+        let position = cameraNode.position
+        let x = Float(position.x), y = Float(position.y), z = Float(position.z)
+        let horizontal = sqrt(x * x + z * z)
+        cameraDistance = sqrt(horizontal * horizontal + y * y)
+        cameraYaw = atan2(x, z)
+        cameraPitch = atan2(y, horizontal)
+        isCameraManual = true
+    }
+
+    private func updateManualCamera() {
+        let horizontal = cameraDistance * cos(cameraPitch)
+        cameraNode.position = SCNVector3(horizontal * sin(cameraYaw), cameraDistance * sin(cameraPitch), horizontal * cos(cameraYaw))
         cameraNode.look(at: SCNVector3(0, 0, 0))
     }
 
@@ -71,6 +132,8 @@ public final class BoardScene {
     }
 
     public func show(position: Position) {
+        clearCaptureEffects()
+        isAnimating = false
         displayedPosition = position
         pieceNodes.values.forEach { $0.removeFromParentNode() }
         pieceNodes.removeAll()
@@ -84,12 +147,17 @@ public final class BoardScene {
     public func animate(move: ChessMove, positionAfter: Position, side: Side, duration: TimeInterval) {
         let before = displayedPosition
         let movingKind = before.piece(at: move.from)?.kind
+        let capturedSquare = movingKind == .pawn && move.to == before.enPassant && before.piece(at: move.to) == nil
+            ? Square(file: move.to.file, rank: move.from.rank) : move.to
+        let captured = before.piece(at: capturedSquare)
+        let hasCapture = captured.map { $0.side != side } ?? false
+        let approach = hasCapture ? duration * 0.35 : duration
         show(position: positionAfter)
         func slide(from: Square, to: Square) {
             guard duration > 0, let node = pieceNodes[to.uci] else { return }
             let destination = node.position
             node.position = world(from, kind: .pawn)
-            let action = SCNAction.move(to: destination, duration: duration)
+            let action = SCNAction.move(to: destination, duration: approach)
             action.timingMode = .easeInEaseOut
             node.runAction(action, forKey: "move")
         }
@@ -98,17 +166,56 @@ public final class BoardScene {
             slide(from: Square(file: move.to.file > move.from.file ? 7 : 0, rank: move.from.rank),
                   to: Square(file: move.to.file > move.from.file ? 5 : 3, rank: move.from.rank))
         }
+        if duration > 0, hasCapture, let captured {
+            eject(captured, at: capturedSquare, delay: approach, duration: duration - approach)
+        }
         clearTrails()
         addTrail(move: move, side: side)
         isAnimating = duration > 0
     }
 
     public func finishAnimation() {
+        clearCaptureEffects()
         isAnimating = false
         for (uci, node) in pieceNodes {
             node.removeAction(forKey: "move")
             if let square = Square(uci: uci) { node.position = world(square, kind: .pawn) }
         }
+    }
+
+    private func eject(_ piece: Piece, at square: Square, delay: TimeInterval, duration: TimeInterval) {
+        // A visual copy cannot participate in board state or later moves.
+        let flying = ArenaPieces.make(piece)
+        flying.name = "captured-" + square.uci
+        let bounds = flying.boundingBox
+        let center = (bounds.max.y + bounds.min.y) / 2
+        flying.pivot = SCNMatrix4MakeTranslation(0, center, 0)
+        var start = world(square, kind: piece.kind)
+        start.y += center
+        flying.position = start
+        captureEffects.addChildNode(flying)
+        let flight = CaptureFlight(start: start)
+        let tumble = SCNAction.customAction(duration: duration) { node, elapsed in
+            let pose = flight.pose(at: Double(elapsed) / duration)
+            node.position = pose.position
+            node.eulerAngles = pose.rotation
+            node.opacity = pose.opacity
+        }
+        flying.runAction(.sequence([.wait(duration: delay), tumble, .removeFromParentNode()]))
+
+        let ring = SCNNode(geometry: SCNTorus(ringRadius: 0.38, pipeRadius: 0.025))
+        ring.name = "capture-flash"
+        ring.geometry?.materials = [ArenaPieces.glow(ArenaPalette.color(for: piece.side))]
+        ring.position = world(square, kind: .pawn)
+        ring.opacity = 0
+        captureEffects.addChildNode(ring)
+        ring.runAction(.sequence([.wait(duration: delay), .fadeIn(duration: 0.04),
+            .group([.scale(to: 2.8, duration: duration * 0.5), .fadeOut(duration: duration * 0.5)]),
+            .removeFromParentNode()]))
+    }
+
+    private func clearCaptureEffects() {
+        captureEffects.childNodes.forEach { $0.removeAllActions(); $0.removeFromParentNode() }
     }
 
     public func layChronicle(moves: [ChessMove], sides: [Side]) {

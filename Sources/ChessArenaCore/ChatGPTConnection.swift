@@ -203,7 +203,7 @@ public final class ChatGPTConnection: ObservableObject {
         var request = URLRequest(url: URL(string: "https://api.openai.com/v1/models")!)
         request.timeoutInterval = 30
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        let (data, response) = try await network.data(for: request)
+        let (data, response) = try await network.loggedData(for: request, operation: .models)
         try Self.check(response, data: data)
         let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         models = (body?["models"] as? [[String: Any]] ?? []).compactMap {
@@ -220,7 +220,7 @@ public final class ChatGPTConnection: ObservableObject {
         request.httpMethod = "POST"; request.timeoutInterval = 30
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         request.httpBody = OAuthEncoding.form(values)
-        let (data, response) = try await network.data(for: request)
+        let (data, response) = try await network.loggedData(for: request, operation: .token)
         guard (response as? HTTPURLResponse)?.statusCode == 200,
               let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw ConnectionError.message("ChatGPT не подтвердил сессию. Повторите вход.")
@@ -254,12 +254,12 @@ public final class ChatGPTConnection: ObservableObject {
               header["alg"] as? String == "RS256", let kid = header["kid"] as? String else {
             throw ConnectionError.message("Некорректное подтверждение личности ChatGPT.")
         }
-        let (discoveryData, discoveryResponse) = try await network.data(from: URL(string: "https://auth.openai.com/.well-known/openid-configuration")!)
+        let (discoveryData, discoveryResponse) = try await network.loggedData(for: URLRequest(url: URL(string: "https://auth.openai.com/.well-known/openid-configuration")!), operation: .discovery)
         try Self.check(discoveryResponse, data: discoveryData)
         let discovery = try JSONSerialization.jsonObject(with: discoveryData) as? [String: Any]
         guard let jwks = discovery?["jwks_uri"] as? String, let url = URL(string: jwks),
               url.scheme == "https", url.host == "auth.openai.com" else { throw ConnectionError.message("Не удалось проверить издателя входа.") }
-        let (data, response) = try await network.data(from: url)
+        let (data, response) = try await network.loggedData(for: URLRequest(url: url), operation: .keys)
         try Self.check(response, data: data)
         let keys = (try JSONSerialization.jsonObject(with: data) as? [String: Any])?["keys"] as? [[String: Any]] ?? []
         guard let key = keys.first(where: { $0["kid"] as? String == kid && $0["kty"] as? String == "RSA" }),

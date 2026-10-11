@@ -14,22 +14,32 @@ struct ControlView: View {
                 Button("Log", systemImage: "doc.text.magnifyingglass", action: runtime.showLog)
                     .help("Запросы к моделям, ответы и ошибки")
             }
+            Button("Log сети", systemImage: "network", action: runtime.showNetworkLog)
+                .help("HTTP-статусы, время запросов, ошибки подключения и локального CLI")
             Text(runtime.status).font(.callout).fixedSize(horizontal: false, vertical: true)
             Divider()
+            if let error = runtime.persistenceError {
+                Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+            }
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     PlayerPanel(title: "БЕЛЫЕ", color: .cyan, player: $runtime.whitePlayer,
-                                runtime: runtime, connection: runtime.chatGPT)
+                                runtime: runtime, connection: runtime.chatGPT, gemini: runtime.gemini)
                     PlayerPanel(title: "ЧЁРНЫЕ", color: .orange, player: $runtime.blackPlayer,
-                                runtime: runtime, connection: runtime.chatGPT)
-                    VStack(alignment: .leading, spacing: 10) {
-                        Label("XAI · GROK И ВЕДУЩИЙ", systemImage: "mic.fill")
-                            .foregroundStyle(.cyan).font(.caption.bold())
-                        SecureField("API-ключ xAI", text: $runtime.grokKey)
-                        TextField("Модель ведущего", text: $runtime.hostModel)
-                            .disabled(runtime.matchRunning && !runtime.paused)
-                        Text("Ведущий использует Grok независимо от выбора игроков.")
-                            .font(.caption).foregroundStyle(.secondary)
+                                runtime: runtime, connection: runtime.chatGPT, gemini: runtime.gemini)
+                    PlayerPanel(title: "РЕФЕРИ / КОММЕНТАТОР", color: .green, player: $runtime.hostPlayer,
+                                runtime: runtime, connection: runtime.chatGPT, gemini: runtime.gemini, isHost: true)
+                    Text("Модель комментирует партию. Легальность ходов и результат проверяет шахматный движок.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if runtime.needsGrok {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Label("ПОДКЛЮЧЕНИЕ GROK", systemImage: "key.fill")
+                                .foregroundStyle(.cyan).font(.caption.bold())
+                            SecureField("API-ключ xAI", text: $runtime.grokKey)
+                        }
+                    }
+                    if runtime.needsGemini {
+                        GeminiPanel(connection: runtime.gemini, locked: runtime.matchRunning)
                     }
                     Picker("Язык эфира и озвучки", selection: $runtime.language) {
                         ForEach(BroadcastLanguage.allCases) { Text($0.name).tag($0) }
@@ -38,7 +48,6 @@ struct ControlView: View {
                     HStack {
                         Text("Общий счёт: \(runtime.score.white) : \(runtime.score.black)")
                         Spacer()
-                        Button("Сбросить счёт", action: runtime.resetScore).disabled(runtime.matchRunning)
                     }
                     if runtime.needsChatGPT {
                         ChatGPTPanel(runtime: runtime, connection: runtime.chatGPT)
@@ -48,11 +57,26 @@ struct ControlView: View {
             }
             Divider()
             HStack {
-                Button(runtime.matchRunning ? "Игра идёт" : "Начать игру", action: runtime.startMatch)
+                Button("Продолжить партию", action: runtime.continueMatch)
                     .buttonStyle(.borderedProminent).tint(.cyan)
-                    .disabled(runtime.matchRunning)
+                    .disabled(!runtime.canContinueMatch)
+                    .help("Продолжить с сохранённой позиции и прежним счётом")
+                Button("Начать новую партию", action: runtime.startNewGame)
+                    .help("Начать с исходной позиции, сохранив счёт серии")
+            }
+            HStack {
+                Button("Начать новую серию", action: runtime.startNewSeries)
+                    .help("Начать новую партию и обнулить счёт серии")
                 Button("Стоп", action: runtime.stopMatch).disabled(!runtime.matchRunning)
                 Button("Проверка тона", action: runtime.tone).disabled(runtime.matchRunning)
+            }
+            HStack {
+                Button("Повторить запрос", systemImage: "arrow.clockwise", action: runtime.repeatPlayerRequest)
+                    .disabled(!runtime.canRepeatRequest)
+                    .help("Отменить ожидание и повторить последний запрос игроку, чей сейчас ход")
+                Spacer()
+                Button("Сбросить вид", systemImage: "viewfinder") { runtime.scene.resetCamera() }
+                    .help("Исходный ракурс. Вращение: перетащите доску; масштаб: колесо мыши или жест на трекпаде")
             }
             Text("Ход \(runtime.moveNumber) · 1920 × 1080")
                 .font(.caption.monospaced()).foregroundStyle(.secondary)
@@ -78,15 +102,32 @@ private struct PlayerPanel: View {
     @Binding var player: PlayerConfiguration
     @ObservedObject var runtime: MatchRuntime
     @ObservedObject var connection: ChatGPTConnection
+    @ObservedObject var gemini: GeminiConnection
+    var isHost = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Label(title, systemImage: "circle.fill").foregroundStyle(color).font(.caption.bold())
             Picker("Нейросеть", selection: $player.provider) {
-                ForEach(NeuralProvider.allCases) { Text($0.rawValue).tag($0) }
+                ForEach(NeuralProvider.allCases.filter { !isHost || $0 != .gemini }) { Text($0.rawValue).tag($0) }
             }
             .disabled(runtime.matchRunning)
-            if player.provider == .chatGPT && runtime.useChatGPTLogin {
+            if player.provider == .gemini {
+                Picker("Модель", selection: $player.model) {
+                    if !gemini.models.contains(where: { $0.id == player.model }) {
+                        Text(player.model + " · каталог не проверен").tag(player.model)
+                    }
+                    ForEach(gemini.models) { Text($0.name).tag($0.id) }
+                }
+                .disabled(runtime.matchRunning && !runtime.paused)
+                HStack {
+                    Button("Проверить модель") { gemini.verify(model: player.model) }
+                        .disabled(gemini.busy || (runtime.matchRunning && !runtime.paused))
+                    if gemini.verifiedModels.contains(player.model) {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    }
+                }
+            } else if player.provider == .chatGPT && runtime.useChatGPTLogin {
                 Picker("Модель", selection: $player.model) {
                     if !connection.models.contains(where: { $0.id == player.model }) {
                         Text(connection.connected ? "Выберите модель" : "Сначала войдите в ChatGPT")
@@ -138,5 +179,27 @@ private struct ChatGPTPanel: View {
         }
         .padding(16)
         .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+private struct GeminiPanel: View {
+    @ObservedObject var connection: GeminiConnection
+    let locked: Bool
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("GEMINI · ЛОКАЛЬНЫЙ CLI", systemImage: "terminal").font(.caption.bold()).foregroundStyle(.mint)
+            TextField("Путь к agy", text: $connection.path).disabled(locked || connection.busy)
+            HStack {
+                Button("Выбрать файл", action: connection.chooseFile)
+                Button("Войти через Google", action: connection.login)
+            }.disabled(locked || connection.busy)
+            HStack {
+                Button("Обновить модели", action: connection.refresh).disabled(locked || connection.busy)
+                if connection.busy { Button("Отменить", action: connection.cancel) }
+            }
+            Text(connection.status).font(.caption).fixedSize(horizontal: false, vertical: true)
+            Text("Сессия хранится в локальном Antigravity CLI. Проверка модели отправляет один тестовый ход. Доступ и квота зависят от Google-аккаунта.")
+                .font(.caption).foregroundStyle(.secondary)
+        }.padding(14).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 14))
     }
 }

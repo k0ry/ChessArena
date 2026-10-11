@@ -12,39 +12,7 @@ struct ProgramView: View {
         HStack(spacing: 0) {
             ZStack {
                 BoardContainer(scene: runtime.scene)
-                VStack {
-                    HStack(spacing: 12) {
-                        Text("CHESS / ARENA")
-                            .font(.system(size: 28, weight: .black, design: .rounded)).tracking(4)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 40).padding(.top, 24)
-                    HStack {
-                        Text(runtime.picture.whiteName)
-                        Spacer()
-                        Text(runtime.picture.clockText)
-                            .monospacedDigit()
-                        Spacer()
-                        Text(runtime.picture.blackName)
-                    }
-                    .font(.title2.weight(.semibold))
-                    .padding(.horizontal, 40)
-                    .padding(.top, 28)
-                    Spacer()
-                    if let banner = runtime.picture.banner {
-                        Text(banner)
-                            .font(.system(size: 56, weight: .bold, design: .serif))
-                            .padding(.bottom, 12)
-                    }
-                    Text(runtime.picture.line)
-                        .font(.title2)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 980)
-                        .padding(.bottom, 42)
-                }
-                .foregroundStyle(.white)
-                .shadow(color: .black.opacity(0.8), radius: 8)
-                .allowsHitTesting(false)
+                ProgramTextOverlay(picture: runtime.picture, language: runtime.language)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -55,7 +23,7 @@ struct ProgramView: View {
         .frame(width: CGFloat(StageMetrics.width), height: CGFloat(StageMetrics.height))
         .background(Color.black)
         .overlay {
-            if runtime.result != nil {
+            if runtime.result != nil && runtime.showResultSplash {
                 ResultSplash(title: runtime.resultTitle,
                              whiteName: runtime.picture.whiteName, blackName: runtime.picture.blackName,
                              score: runtime.score, seconds: runtime.nextGameIn, language: runtime.language,
@@ -206,8 +174,9 @@ private struct ThinkingLine: View {
 struct BoardContainer: NSViewRepresentable {
     let scene: BoardScene
 
-    func makeNSView(context: Context) -> SCNView {
-        let view = SCNView()
+    func makeNSView(context: Context) -> InteractiveBoardView {
+        let view = InteractiveBoardView()
+        view.arena = scene
         view.scene = scene.scene
         view.pointOfView = scene.cameraNode
         view.allowsCameraControl = false
@@ -219,8 +188,43 @@ struct BoardContainer: NSViewRepresentable {
         return view
     }
 
-    func updateNSView(_ view: SCNView, context: Context) {
+    func updateNSView(_ view: InteractiveBoardView, context: Context) {
+        view.arena = scene
         view.scene = scene.scene
         view.pointOfView = scene.cameraNode
     }
+}
+
+/// Controls the same camera used by the screen and archive renderer.
+final class InteractiveBoardView: SCNView {
+    var arena: BoardScene?
+    override var acceptsFirstResponder: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        NSCursor.closedHand.set()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        arena?.orbitCamera(yaw: -Float(event.deltaX) * 0.008, pitch: Float(event.deltaY) * 0.008)
+    }
+
+    override func mouseUp(with event: NSEvent) { NSCursor.openHand.set() }
+
+    override func scrollWheel(with event: NSEvent) {
+        let sensitivity: Float = event.hasPreciseScrollingDeltas ? 0.008 : 0.08
+        arena?.zoomCamera(scale: exp(-Float(event.scrollingDeltaY) * sensitivity))
+    }
+
+    override func magnify(with event: NSEvent) {
+        arena?.zoomCamera(scale: exp(-Float(event.magnification)))
+    }
+
+    override func rotate(with event: NSEvent) {
+        arena?.orbitCamera(yaw: Float(event.rotation) * .pi / 180, pitch: 0)
+    }
+
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .openHand) }
 }

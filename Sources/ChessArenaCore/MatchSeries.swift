@@ -1,6 +1,6 @@
 import Foundation
 
-public enum BroadcastLanguage: String, CaseIterable, Identifiable, Sendable {
+public enum BroadcastLanguage: String, CaseIterable, Identifiable, Sendable, Codable {
     case russian = "ru-RU"
     case english = "en-US"
     public var id: String { rawValue }
@@ -34,7 +34,7 @@ public struct SeriesScore: Codable, Equatable, Sendable {
 }
 
 /// Owns round identity, exactly-once scoring and the restart deadline independently of API/voice work.
-public struct MatchSeries {
+public struct MatchSeries: Codable {
     public static let intermission: TimeInterval = 30
     public private(set) var score: SeriesScore
     public private(set) var running = false
@@ -46,16 +46,34 @@ public struct MatchSeries {
         running = true
         return beginRound()
     }
+    /// Resume an unfinished round without replacing its identity or scoring it again.
+    public mutating func resumeRound() -> UUID? {
+        guard result == nil else { return nil }
+        running = true
+        restartAt = nil
+        if let roundID { return roundID }
+        return beginRound()
+    }
+    public mutating func startNewSeries() -> UUID {
+        score = SeriesScore()
+        return start()
+    }
     private mutating func beginRound() -> UUID {
         let id = UUID()
         roundID = id; result = nil; restartAt = nil
         return id
     }
     @discardableResult
-    public mutating func complete(round: UUID, result: GameEnd, now: TimeInterval) -> Bool {
+    public mutating func complete(round: UUID, result: GameEnd, now: TimeInterval, startIntermission: Bool = true) -> Bool {
         guard running, roundID == round, self.result == nil else { return false }
         self.result = result
         score.record(result)
+        restartAt = startIntermission ? now + Self.intermission : nil
+        return true
+    }
+    @discardableResult
+    public mutating func beginIntermission(round: UUID, now: TimeInterval) -> Bool {
+        guard running, roundID == round, result != nil, restartAt == nil else { return false }
         restartAt = now + Self.intermission
         return true
     }

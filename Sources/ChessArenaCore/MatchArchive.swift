@@ -30,6 +30,13 @@ public final class MatchArchive {
         self.blackName = blackName
     }
 
+    public func restore(moves: [AcceptedMove], journal: [JournalEntry], end: GameEnd?) {
+        precondition(!isOpen)
+        self.moves = moves
+        self.journal = journal
+        markResult(end)
+    }
+
     public var videoURL: URL { directory.appendingPathComponent("match.mp4") }
     public var pgnURL: URL { directory.appendingPathComponent("game.pgn") }
     public var journalURL: URL { directory.appendingPathComponent("commentary.json") }
