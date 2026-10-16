@@ -24,11 +24,11 @@ struct ControlView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     PlayerPanel(title: "БЕЛЫЕ", color: .cyan, player: $runtime.whitePlayer,
-                                runtime: runtime, connection: runtime.chatGPT, gemini: runtime.gemini)
+                                runtime: runtime, connection: runtime.chatGPT, gemini: runtime.gemini, claude: runtime.claude)
                     PlayerPanel(title: "ЧЁРНЫЕ", color: .orange, player: $runtime.blackPlayer,
-                                runtime: runtime, connection: runtime.chatGPT, gemini: runtime.gemini)
+                                runtime: runtime, connection: runtime.chatGPT, gemini: runtime.gemini, claude: runtime.claude)
                     PlayerPanel(title: "РЕФЕРИ / КОММЕНТАТОР", color: .green, player: $runtime.hostPlayer,
-                                runtime: runtime, connection: runtime.chatGPT, gemini: runtime.gemini, isHost: true)
+                                runtime: runtime, connection: runtime.chatGPT, gemini: runtime.gemini, claude: runtime.claude, isHost: true)
                     Text("Модель комментирует партию. Легальность ходов и результат проверяет шахматный движок.")
                         .font(.caption).foregroundStyle(.secondary)
                     if runtime.needsGrok {
@@ -40,6 +40,9 @@ struct ControlView: View {
                     }
                     if runtime.needsGemini {
                         GeminiPanel(connection: runtime.gemini, locked: runtime.matchRunning)
+                    }
+                    if runtime.needsClaude {
+                        ClaudePanel(runtime: runtime, connection: runtime.claude)
                     }
                     Picker("Язык эфира и озвучки", selection: $runtime.language) {
                         ForEach(BroadcastLanguage.allCases) { Text($0.name).tag($0) }
@@ -103,6 +106,7 @@ private struct PlayerPanel: View {
     @ObservedObject var runtime: MatchRuntime
     @ObservedObject var connection: ChatGPTConnection
     @ObservedObject var gemini: GeminiConnection
+    @ObservedObject var claude: ClaudeConnection
     var isHost = false
 
     var body: some View {
@@ -127,6 +131,17 @@ private struct PlayerPanel: View {
                         Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                     }
                 }
+            } else if player.provider == .claude {
+                let catalog = runtime.claudeAccess == .subscription ? ClaudeCLI.aliases : claude.models
+                Picker("Модель", selection: $player.model) {
+                    if !catalog.contains(where: { $0.id == player.model }) {
+                        Text(player.model + (runtime.claudeAccess == .subscription ? " · полный ID" : claude.models.isEmpty ? " · каталог не загружен" : " · нет в каталоге")).tag(player.model)
+                    }
+                    ForEach(catalog) { Text($0.name).tag($0.id) }
+                }
+                .disabled(runtime.matchRunning && !runtime.paused)
+                TextField("ID модели Claude вручную", text: $player.model)
+                    .disabled(runtime.matchRunning && !runtime.paused)
             } else if player.provider == .chatGPT && runtime.useChatGPTLogin {
                 Picker("Модель", selection: $player.model) {
                     if !connection.models.contains(where: { $0.id == player.model }) {
@@ -179,6 +194,62 @@ private struct ChatGPTPanel: View {
         }
         .padding(16)
         .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+private struct ClaudePanel: View {
+    @ObservedObject var runtime: MatchRuntime
+    @ObservedObject var connection: ClaudeConnection
+
+    private var subscription: Binding<Bool> {
+        Binding(get: { runtime.claudeAccess == .subscription },
+                set: { runtime.claudeAccess = $0 ? .subscription : .apiKey })
+    }
+    private var locked: Bool { runtime.matchRunning && !runtime.paused }
+    private var verifyModel: String {
+        [runtime.whitePlayer, runtime.blackPlayer, runtime.hostPlayer].first { $0.provider == .claude }?.model ?? "sonnet"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("ПОДКЛЮЧЕНИЕ CLAUDE", systemImage: "person.crop.circle").font(.caption.bold()).foregroundStyle(.purple)
+            Toggle("Подписка Claude через локальный Claude Code CLI", isOn: subscription)
+                .disabled(runtime.matchRunning)
+            if runtime.claudeAccess == .subscription {
+                TextField("Путь к claude", text: $connection.path).disabled(locked || connection.busy)
+                HStack {
+                    Button("Выбрать файл", action: connection.chooseFile)
+                    Button("Войти по подписке", action: connection.login)
+                }.disabled(locked || connection.busy)
+                HStack {
+                    Button("Проверить подключение") { connection.verifyCLI(model: verifyModel) }
+                        .disabled(locked || connection.busy)
+                    if connection.cliVerified {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    }
+                    if connection.busy {
+                        ProgressView().controlSize(.small)
+                        Button("Отменить", action: connection.cancel)
+                    }
+                }
+                Text(connection.cliStatus).font(.caption).fixedSize(horizontal: false, vertical: true)
+                Text("Вход и сессия хранятся в локальном Claude Code CLI; приложение не читает токены. Проверка отправляет один короткий запрос из лимита подписки. Модели: opus, sonnet, haiku или полный ID.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                SecureField("API-ключ Anthropic", text: $runtime.claudeKey).disabled(locked)
+                HStack {
+                    Button("Обновить модели") { connection.refresh(key: runtime.claudeKey) }
+                        .disabled(connection.busy || locked)
+                    if connection.busy {
+                        ProgressView().controlSize(.small)
+                        Button("Отменить", action: connection.cancel)
+                    }
+                }
+                Text(connection.status).font(.caption).fixedSize(horizontal: false, vertical: true)
+                Text("Ключ хранится в Keychain и передаётся только в заголовке запроса к Anthropic. Каталог показывает модели ключа; доступ к модели и кредиты подтверждаются первым запросом.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }.padding(14).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 14))
     }
 }
 

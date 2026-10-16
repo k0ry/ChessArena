@@ -11,6 +11,13 @@ public enum NetworkOperation: String, Sendable {
     case cliVersion = "Gemini CLI · версия"
     case cliModels = "Gemini CLI · каталог моделей"
     case cliCompletion = "Gemini CLI · запрос к модели"
+    case anthropicMessages = "Claude · запрос к модели"
+    case anthropicModels = "Claude · каталог моделей"
+    case claudeVersion = "Claude Code CLI · версия"
+    case claudeVerify = "Claude Code CLI · проверка подключения"
+    case claudeCompletion = "Claude Code CLI · запрос к модели"
+
+    var isClaudeCLI: Bool { [.claudeVersion, .claudeVerify, .claudeCompletion].contains(self) }
 }
 
 public struct NetworkLogEntry: Identifiable, Equatable, Sendable {
@@ -41,7 +48,7 @@ public struct NetworkLogEntry: Identifiable, Equatable, Sendable {
         if let sentBytes { lines.append("Тело запроса: \(sentBytes) байт") }
         if let receivedBytes { lines.append("Данные ответа: \(receivedBytes) байт") }
         if let error { lines.append("Ошибка: \(error)") }
-        if isCLI { lines.append("Локальный процесс agy. Внутренние HTTP-запросы CLI недоступны приложению.") }
+        if isCLI { lines.append("Локальный процесс CLI. Внутренние HTTP-запросы CLI недоступны приложению.") }
         if operation == .responses { lines.append("Размер ответа учитывает прочитанный текст SSE без разделителей строк.") }
         return lines.joined(separator: "\n")
     }
@@ -59,7 +66,7 @@ public final class NetworkLog: ObservableObject {
         let id = UUID()
         let method = request.map { ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"].contains($0.httpMethod ?? "GET") ? ($0.httpMethod ?? "GET") : "HTTP" } ?? "CLI"
         entries.insert(NetworkLogEntry(id: id, date: Date(), operation: operation,
-            endpoint: request.map { Self.endpoint($0.url) } ?? "local-cli://antigravity",
+            endpoint: request.map { Self.endpoint($0.url) } ?? (operation.isClaudeCLI ? "local-cli://claude" : "local-cli://antigravity"),
             method: method, timeout: request?.timeoutInterval, sentBytes: request?.httpBody?.count), at: 0)
         if entries.count > capacity { entries.removeLast(entries.count - capacity) }
         return id
@@ -68,8 +75,8 @@ public final class NetworkLog: ObservableObject {
     // Known endpoints are enough to diagnose this client's routes. Unknown paths can contain secrets.
     private static func endpoint(_ url: URL?) -> String {
         guard let url else { return "(адрес отсутствует)" }
-        let hosts = ["api.x.ai", "api.openai.com", "auth.openai.com"]
-        let paths = ["/v1/chat/completions", "/v1/responses", "/v1/models",
+        let hosts = ["api.x.ai", "api.openai.com", "auth.openai.com", "api.anthropic.com"]
+        let paths = ["/v1/chat/completions", "/v1/responses", "/v1/models", "/v1/messages",
                      "/api/accounts/oauth/token", "/.well-known/openid-configuration", "/.well-known/jwks.json"]
         let host = hosts.contains(url.host ?? "") ? url.host! : "[сервер скрыт]"
         let path = paths.contains(url.path) ? url.path : "/[путь скрыт]"

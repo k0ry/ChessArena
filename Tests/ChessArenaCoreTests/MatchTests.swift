@@ -126,7 +126,7 @@ final class MatchTests: XCTestCase {
     }
 
     func testSelectedCommentatorUsesItsOwnProviderModelAndKeyWithoutPlayerNotes() async throws {
-        for provider in [NeuralProvider.grok, .chatGPT] {
+        for provider in [NeuralProvider.grok, .chatGPT, .claude] {
             var host = PlayerConfiguration(provider: provider)
             host.model = "selected-commentator-model"
             let rig = try makeRig(hostPlayer: host)
@@ -136,9 +136,11 @@ final class MatchTests: XCTestCase {
                              body: #"{"move":"e2e4","taunt":"Go.","self_notes":"PRIVATE_PLAYER_PLAN"}"#)
             try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
             let call = try XCTUnwrap(rig.chat.calls.last)
-            XCTAssertEqual(call.url, provider.baseURL.appendingPathComponent("chat/completions"))
+            XCTAssertEqual(call.url, provider.baseURL.appendingPathComponent(provider == .claude ? "messages" : "chat/completions"))
             XCTAssertEqual(call.model, "selected-commentator-model")
-            XCTAssertEqual(call.apiKey, provider == .grok ? "grok-key" : "openai-key")
+            XCTAssertEqual(call.apiKey, ["grok-key", "openai-key", "", "claude-key"][NeuralProvider.allCases.firstIndex(of: provider)!])
+            XCTAssertEqual(call.route, rigKeys.route(for: provider))
+            XCTAssertEqual(call.effort, "low")
             XCTAssertNil(call.selfNotes)
             XCTAssertFalse(call.user.contains("PRIVATE_PLAYER_PLAN"))
             rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "Комментарий выбранной модели.")
@@ -226,9 +228,10 @@ final class MatchTests: XCTestCase {
                 try await waitUntil { rig.chat.calls.contains { $0.system.contains("You are White") } }
                 let opening = try XCTUnwrap(rig.chat.calls.first { $0.system.contains("You are White") })
                 XCTAssertEqual(opening.url.host, whiteProvider.baseURL.host)
-                XCTAssertEqual(opening.apiKey, whiteProvider == .gemini ? "" : whiteProvider == .grok ? "grok-key" : "openai-key")
+                XCTAssertEqual(opening.apiKey, expectedKey(whiteProvider))
                 XCTAssertEqual(opening.model, "white-selected-model")
-                XCTAssertEqual(opening.route, whiteProvider == .gemini ? .geminiCLI : .http)
+                XCTAssertEqual(opening.route, rigKeys.route(for: whiteProvider))
+                XCTAssertEqual(opening.effort, "high")
                 rig.chat.fulfill(where: { $0.system.contains("You are White") }, body: jsonMove("e2e4", "Go."))
                 try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
                 let host = try XCTUnwrap(rig.chat.calls.first { $0.system.contains("already on the board") })
@@ -238,9 +241,9 @@ final class MatchTests: XCTestCase {
                 try await waitUntil { rig.chat.calls.contains { $0.system.contains("You are Black") } }
                 let reply = try XCTUnwrap(rig.chat.calls.first { $0.system.contains("You are Black") })
                 XCTAssertEqual(reply.url.host, blackProvider.baseURL.host)
-                XCTAssertEqual(reply.apiKey, blackProvider == .gemini ? "" : blackProvider == .grok ? "grok-key" : "openai-key")
+                XCTAssertEqual(reply.apiKey, expectedKey(blackProvider))
                 XCTAssertEqual(reply.model, "black-selected-model")
-                XCTAssertEqual(reply.route, blackProvider == .gemini ? .geminiCLI : .http)
+                XCTAssertEqual(reply.route, rigKeys.route(for: blackProvider))
                 XCTAssertEqual(rig.engine.picture.whiteName, whiteProvider.rawValue)
                 XCTAssertEqual(rig.engine.picture.blackName, blackProvider.rawValue)
                 XCTAssertEqual(rig.engine.picture.replies.first?.name, whiteProvider.rawValue)
@@ -250,6 +253,60 @@ final class MatchTests: XCTestCase {
                 try await rig.engine.closeArchive()
             }
         }
+    }
+
+    func testClaudeRefusalPausesWithoutRetryAndHTTPErrorsRetryLikeOtherProviders() async throws {
+        let rig = try makeRig(whitePlayer: PlayerConfiguration(provider: .claude))
+        try await rig.engine.start(at: 0)
+        try await waitUntil { rig.chat.calls.count == 1 }
+        let original = rig.engine.referee.position.fen
+        XCTAssertEqual(rig.chat.calls[0].route, .anthropic)
+        rig.chat.fail(where: { $0.route == .anthropic }, error: .refused)
+        try await waitUntil { rig.engine.paused }
+        XCTAssertNil(rig.engine.retryAt)
+        XCTAssertTrue(rig.engine.pauseReason?.contains("отказалась") == true)
+        await rig.engine.advance(to: 1000)
+        XCTAssertEqual(rig.engine.moveRequestCount, 1)
+        XCTAssertEqual(rig.engine.referee.position.fen, original)
+        var referee = rig.engine.referee
+        if case .rejected(_, let attempt) = referee.submit(rawMove: "invalid", taunt: "") {
+            XCTAssertEqual(attempt, 1)
+        } else { XCTFail("A refusal must not count as an illegal move") }
+        rig.engine.white.model = "claude-sonnet-5-5"
+        rig.engine.resume()
+        try await waitUntil { rig.chat.calls.count == 2 }
+        XCTAssertEqual(rig.chat.calls.last?.model, "claude-sonnet-5-5")
+        XCTAssertTrue(rig.chat.calls.last?.user.contains(original) == true)
+        rig.chat.fail(where: { $0.route == .anthropic && $0.model == "claude-sonnet-5-5" }, error: .http(status: 401, reason: .authentication))
+        try await waitUntil { rig.engine.paused }
+        XCTAssertNotNil(rig.engine.retryAt, "HTTP errors keep the shared automatic retry")
+        XCTAssertTrue(rig.engine.pauseReason?.contains("HTTP 401") == true)
+        rig.engine.stop()
+        try await rig.engine.closeArchive()
+    }
+
+    func testClaudeSubscriptionSeatUsesLocalCLIWithoutKeyAndPausesWithoutRetry() async throws {
+        var keys = rigKeys; keys.claudeAccess = .subscription
+        let white = PlayerConfiguration(provider: .claude).seat(side: .white, keys: keys)
+        let rig = try makeRig(whiteSeat: white)
+        try await rig.engine.start(at: 0)
+        try await waitUntil { rig.chat.calls.count == 1 }
+        let call = try XCTUnwrap(rig.chat.calls.first)
+        XCTAssertEqual(call.route, .claudeCLI)
+        XCTAssertEqual(call.url, ClaudeCLI.localURL)
+        XCTAssertEqual(call.apiKey, "")
+        XCTAssertEqual(call.model, ModelCatalog.claudeModel)
+        let original = rig.engine.referee.position.fen
+        rig.chat.fail(where: { $0.route == .claudeCLI }, error: .claudeCLI(.quota))
+        try await waitUntil { rig.engine.paused }
+        XCTAssertNil(rig.engine.retryAt)
+        XCTAssertTrue(rig.engine.pauseReason?.contains("подписки") == true)
+        await rig.engine.advance(to: 1000)
+        XCTAssertEqual(rig.engine.moveRequestCount, 1)
+        XCTAssertEqual(rig.engine.referee.position.fen, original)
+        XCTAssertEqual(rig.engine.picture.whiteName, "Claude")
+        rig.engine.stop()
+        try await rig.engine.closeArchive()
     }
 
     func testCLIErrorPausesWithoutIllegalMoveOrAutomaticRetry() async throws {
@@ -730,17 +787,18 @@ final class MatchTests: XCTestCase {
 
     private func makeRig(
         whitePlayer: PlayerConfiguration? = nil, blackPlayer: PlayerConfiguration? = nil,
-        hostPlayer: PlayerConfiguration? = nil, gameMemory: GameMemory = GameMemory()
+        hostPlayer: PlayerConfiguration? = nil, gameMemory: GameMemory = GameMemory(), whiteSeat: Seat? = nil
     ) throws -> Rig {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let archive = MatchArchive(directory: directory,
-                                   whiteName: whitePlayer?.provider.rawValue ?? "Grok",
+                                   whiteName: whiteSeat?.name ?? whitePlayer?.provider.rawValue ?? "Grok",
                                    blackName: blackPlayer?.provider.rawValue ?? "ChatGPT")
         let chat = ScriptedChat()
         let secret = "CHESSARENA-SECRET-KEY-9f3c2a7b"
-        let white = whitePlayer?.seat(side: .white, grokKey: "grok-key", chatKey: "openai-key") ?? Seat.defaultWhite(apiKey: secret)
-        let black = blackPlayer?.seat(side: .black, grokKey: "grok-key", chatKey: "openai-key") ?? Seat.defaultBlack(apiKey: secret)
-        let host = hostPlayer?.seat(side: .white, grokKey: "grok-key", chatKey: "openai-key")
+        let keys = rigKeys
+        let white = whiteSeat ?? whitePlayer?.seat(side: .white, keys: keys) ?? Seat.defaultWhite(apiKey: secret)
+        let black = blackPlayer?.seat(side: .black, keys: keys) ?? Seat.defaultBlack(apiKey: secret)
+        let host = hostPlayer?.seat(side: .white, keys: keys)
             ?? Seat(name: "Host", baseURL: ModelCatalog.grokAPI, model: ModelCatalog.grokModel, apiKey: secret, side: .white)
         let engine = MatchEngine(
             scene: BoardScene(),
@@ -770,6 +828,17 @@ final class MatchTests: XCTestCase {
 private struct Rig {
     var engine: MatchEngine
     var chat: ScriptedChat
+}
+
+private let rigKeys = ProviderKeys(grok: "grok-key", chatGPT: "openai-key", anthropic: "claude-key", claudeAccess: .apiKey)
+
+private func expectedKey(_ provider: NeuralProvider) -> String {
+    switch provider {
+    case .grok: return "grok-key"
+    case .chatGPT: return "openai-key"
+    case .gemini: return ""
+    case .claude: return "claude-key"
+    }
 }
 
 private func jsonMove(_ uci: String, _ taunt: String) -> String {

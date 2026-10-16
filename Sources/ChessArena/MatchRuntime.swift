@@ -7,6 +7,7 @@ final class MatchRuntime: ObservableObject {
     @Published var picture = BroadcastPicture.empty
     let chatGPT = ChatGPTConnection()
     let gemini = GeminiConnection()
+    let claude = ClaudeConnection()
     let modelLog = ModelLog()
     private var logWindow: NSWindow?
     private var networkLogWindow: NSWindow?
@@ -38,8 +39,15 @@ final class MatchRuntime: ObservableObject {
         logWindow = window
     }
     @Published var useChatGPTLogin = true { didSet { saveState() } }
+    @Published var claudeAccess: ClaudeAccess = .subscription { didSet { saveState() } }
     @Published var grokKey = "" { didSet { saveKey(grokKey, account: "grok") } }
     @Published var chatKey = "" { didSet { saveKey(chatKey, account: "chatgpt") } }
+    @Published var claudeKey = "" {
+        didSet {
+            saveKey(claudeKey, account: "anthropic")
+            if claudeKey != oldValue { claude.keyChanged() }
+        }
+    }
     @Published var whitePlayer = PlayerConfiguration(provider: .grok) {
         didSet { updatePlayerNames() }
     }
@@ -96,6 +104,7 @@ final class MatchRuntime: ObservableObject {
         restoring = true
         grokKey = (try? secrets.load(account: "grok")) ?? ""
         chatKey = (try? secrets.load(account: "chatgpt")) ?? ""
+        claudeKey = (try? secrets.load(account: "anthropic")) ?? ""
         loadScore()
         do {
             if let saved = try sessionStore.load() {
@@ -103,6 +112,7 @@ final class MatchRuntime: ObservableObject {
                 blackPlayer = saved.black
                 hostPlayer = saved.hostConfiguration
                 useChatGPTLogin = saved.useChatGPTLogin
+                claudeAccess = saved.claudeAccess ?? .subscription
                 language = saved.language
                 series = saved.series
                 showResultSplash = saved.series.result != nil
@@ -168,7 +178,8 @@ final class MatchRuntime: ObservableObject {
         }
         let saved = SavedSession(game: savedGame, series: series, white: whitePlayer, black: blackPlayer,
                                  hostModel: hostPlayer.model, language: language, useChatGPTLogin: useChatGPTLogin,
-                                 camera: scene.cameraCheckpoint, hostProvider: hostPlayer.provider, gameMemory: gameMemory)
+                                 camera: scene.cameraCheckpoint, hostProvider: hostPlayer.provider, gameMemory: gameMemory,
+                                 claudeAccess: claudeAccess)
         do {
             try sessionStore.save(saved)
             if saveFailed { persistenceError = nil; saveFailed = false }
@@ -260,13 +271,13 @@ final class MatchRuntime: ObservableObject {
         let folder = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ChessArena", isDirectory: true)
             .appendingPathComponent(ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-") + "-" + round.uuidString + "-" + UUID().uuidString, isDirectory: true)
-        let white = whitePlayer.seat(side: .white, grokKey: grokKey, chatKey: chatKey)
-        let black = blackPlayer.seat(side: .black, grokKey: grokKey, chatKey: chatKey)
+        let white = whitePlayer.seat(side: .white, keys: keys)
+        let black = blackPlayer.seat(side: .black, keys: keys)
         let archive = MatchArchive(directory: folder, whiteName: white.name, blackName: black.name)
         let match = MatchEngine(
             scene: scene,
             voice: voice,
-            transport: ArenaChatTransport(connection: useChatGPTLogin ? chatGPT : nil, gemini: gemini.cli),
+            transport: ArenaChatTransport(connection: useChatGPTLogin ? chatGPT : nil, gemini: gemini.cli, claude: claude.cli),
             archive: archive,
             white: white,
             black: black,
@@ -326,8 +337,8 @@ final class MatchRuntime: ObservableObject {
     func resume() {
         guard let engine, engine.paused else { return }
         guard validatePlayers() else { return }
-        engine.white = whitePlayer.seat(side: .white, grokKey: grokKey, chatKey: chatKey)
-        engine.black = blackPlayer.seat(side: .black, grokKey: grokKey, chatKey: chatKey)
+        engine.white = whitePlayer.seat(side: .white, keys: keys)
+        engine.black = blackPlayer.seat(side: .black, keys: keys)
         engine.host = configuredHost
         engine.resume()
         paused = false
@@ -339,11 +350,15 @@ final class MatchRuntime: ObservableObject {
     }
 
     var needsGemini: Bool { configurations.contains { $0.provider == .gemini } }
+    var needsClaude: Bool { configurations.contains { $0.provider == .claude } }
+    private var keys: ProviderKeys { ProviderKeys(grok: grokKey, chatGPT: chatKey, anthropic: claudeKey, claudeAccess: claudeAccess) }
 
     func shutdown() {
         saveState()
         gemini.cancel()
+        claude.cancel()
         GeminiCLI.cancelAll()
+        ClaudeCLI.cancelAll()
     }
 
     var needsGrok: Bool {
@@ -353,7 +368,7 @@ final class MatchRuntime: ObservableObject {
     private var configurations: [PlayerConfiguration] { [whitePlayer, blackPlayer, hostPlayer] }
 
     private var configuredHost: Seat {
-        var seat = hostPlayer.seat(side: .white, grokKey: grokKey, chatKey: chatKey)
+        var seat = hostPlayer.seat(side: .white, keys: keys)
         seat.name = "Host"
         return seat
     }
@@ -380,6 +395,19 @@ final class MatchRuntime: ObservableObject {
     }
 
     private func validatePlayers() -> Bool {
+        if needsClaude {
+            switch claudeAccess {
+            case .apiKey:
+                guard !claudeKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    status = "Введите API-ключ Anthropic для Claude"; return false
+                }
+            case .subscription:
+                guard !claude.busy else { status = "Дождитесь проверки Claude Code CLI"; return false }
+                guard claude.cliVerified else {
+                    status = "Проверьте подключение Claude по подписке в настройках"; return false
+                }
+            }
+        }
         if needsGrok, grokKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             status = "Введите ключ xAI для выбранных участников Grok"; return false
         }
@@ -417,8 +445,8 @@ final class MatchRuntime: ObservableObject {
         let elapsed = Date().timeIntervalSince(startedAt)
         scene.applyCamera(at: elapsed)
         if engine.paused {
-            engine.white = whitePlayer.seat(side: .white, grokKey: grokKey, chatKey: chatKey)
-            engine.black = blackPlayer.seat(side: .black, grokKey: grokKey, chatKey: chatKey)
+            engine.white = whitePlayer.seat(side: .white, keys: keys)
+            engine.black = blackPlayer.seat(side: .black, keys: keys)
             engine.host = configuredHost
         }
         await engine.advance(to: elapsed)

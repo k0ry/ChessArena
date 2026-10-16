@@ -13,10 +13,14 @@ public enum ModelCatalog {
     /// Chat Completions `v1/chat/completions` is supported.
     public static let chatGPTModel = "chat-latest"
     public static let openAIAPI = URL(string: "https://api.openai.com/v1")!
+    /// platform.claude.com, October 2026: Claude Opus 5.5 is the current Opus and the default model.
+    public static let claudeModel = "claude-opus-5-5"
+    public static let anthropicAPI = URL(string: "https://api.anthropic.com/v1")!
+    public static let anthropicVersion = "2023-06-01"
     public static let toneTest = "Sound check. The pieces are awake, and so is the sarcasm."
 }
 
-public enum ChatRoute: String, Sendable { case http, geminiCLI }
+public enum ChatRoute: String, Sendable { case http, geminiCLI, anthropic, claudeCLI }
 
 public struct Seat: Equatable, Sendable {
     public var route: ChatRoute
@@ -44,8 +48,11 @@ public struct Seat: Equatable, Sendable {
     }
 
     public var completionsURL: URL {
-        if route == .geminiCLI { return baseURL }
-        return baseURL.appendingPathComponent("chat").appendingPathComponent("completions")
+        switch route {
+        case .geminiCLI, .claudeCLI: return baseURL
+        case .anthropic: return baseURL.appendingPathComponent("messages")
+        case .http: return baseURL.appendingPathComponent("chat").appendingPathComponent("completions")
+        }
     }
 }
 
@@ -58,9 +65,12 @@ public struct ChatCall: Equatable, Sendable {
     public var user: String
     public var selfNotes: String?
     public var gameAdvice: String?
+    /// Reasoning depth for providers that accept it (Anthropic `output_config.effort`); other routes ignore it.
+    public var effort: String?
 
-    public init(url: URL, apiKey: String, model: String, system: String, user: String, selfNotes: String? = nil, route: ChatRoute = .http, gameAdvice: String? = nil) {
+    public init(url: URL, apiKey: String, model: String, system: String, user: String, selfNotes: String? = nil, route: ChatRoute = .http, gameAdvice: String? = nil, effort: String? = nil) {
         self.route = route
+        self.effort = effort
         self.url = url
         self.apiKey = apiKey
         self.model = model
@@ -89,10 +99,23 @@ public enum ChatError: Error, Equatable {
     case timeout
     case http(status: Int, reason: APIErrorReason)
     case unreadable
+    /// The provider answered 200 but declined to produce a reply; repeating the same request changes nothing.
+    case refused
+    case claudeCLI(ClaudeCLIError)
+
+    /// Local CLI failures and refusals need the user, not a timer: the engine pauses without automatic retry.
+    public var pausesWithoutRetry: Bool {
+        switch self {
+        case .cli, .claudeCLI, .refused: return true
+        case .transport, .timeout, .http, .unreadable: return false
+        }
+    }
 
     public var userMessage: String {
         switch self {
         case .cli(let reason): return reason.userMessage
+        case .claudeCLI(let reason): return reason.userMessage
+        case .refused: return "Модель отказалась отвечать на этот запрос. Повтор не поможет: выберите другую модель и продолжите партию."
         case .transport: return "Не удалось соединиться с API. Проверьте сеть и повторите ход."
         case .timeout: return "API не ответил за отведённое время. Повторите ход."
         case .unreadable: return "API вернул нечитаемый ответ."
@@ -133,6 +156,21 @@ public enum APIErrorReason: String, Equatable {
         if status == 403 { return .permission }
         if status == 404 { return .modelAccess }
         if status >= 500 { return .server }
+        return .request
+    }
+
+    /// Anthropic error envelope: {"type":"error","error":{"type":"...","message":"..."}}. Messages may contain the key.
+    static func classifyAnthropic(status: Int, data: Data) -> Self {
+        let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        let error = object?["error"] as? [String: Any]
+        let type = error?["type"] as? String ?? ""
+        let message = (error?["message"] as? String ?? "").lowercased()
+        if type == "authentication_error" || status == 401 { return .authentication }
+        if type == "permission_error" || status == 403 { return .permission }
+        if type == "not_found_error" || status == 404 { return .modelAccess }
+        if type == "billing_error" || status == 402 || message.contains("credit balance") { return .quota }
+        if type == "rate_limit_error" || status == 429 { return .rateLimit }
+        if type == "overloaded_error" || type == "api_error" || status >= 500 { return .server }
         return .request
     }
 }

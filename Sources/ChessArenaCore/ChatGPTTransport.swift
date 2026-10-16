@@ -6,14 +6,21 @@ public final class ArenaChatTransport: ChatTransport {
     private let connection: ChatGPTConnection?
     private let network: URLSession
     private let gemini: GeminiCLI?
+    private let anthropic: ChatTransport
+    private let claude: ClaudeCLI?
 
-    public init(connection: ChatGPTConnection?, api: ChatTransport = URLSessionChatTransport(), network: URLSession = .shared, gemini: GeminiCLI? = nil) {
+    public init(connection: ChatGPTConnection?, api: ChatTransport = URLSessionChatTransport(), network: URLSession = .shared,
+                gemini: GeminiCLI? = nil, anthropic: ChatTransport = AnthropicTransport(), claude: ClaudeCLI? = nil) {
         self.gemini = gemini
+        self.anthropic = anthropic
+        self.claude = claude
         self.connection = connection; self.api = api; self.network = network
     }
 
     public func requestURL(for call: ChatCall) -> URL {
         if call.route == .geminiCLI { return URL(string: "local-cli://antigravity")! }
+        if call.route == .anthropic { return call.url }
+        if call.route == .claudeCLI { return ClaudeCLI.localURL }
         if call.url.host == "api.openai.com", connection != nil {
             return URL(string: "https://api.openai.com/v1/responses")!
         }
@@ -24,6 +31,11 @@ public final class ArenaChatTransport: ChatTransport {
         if call.route == .geminiCLI {
             guard let gemini else { throw ChatError.cli(.missing) }
             return try await gemini.complete(call)
+        }
+        if call.route == .anthropic { return try await anthropic.complete(call) }
+        if call.route == .claudeCLI {
+            guard let claude else { throw ChatError.claudeCLI(.missing) }
+            return try await claude.complete(call)
         }
         guard call.url.host == "api.openai.com", let connection else { return try await api.complete(call) }
         let token: String

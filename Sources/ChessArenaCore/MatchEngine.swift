@@ -300,7 +300,7 @@ public final class MatchEngine {
         scene.setThinking(nil)
         let side = referee.position.sideToMove
         let seat = side == .white ? white : black
-        if case .cli = error {
+        if error.pausesWithoutRetry {
             retryAt = nil
             pauseReason = "\(seat.name): \(error.userMessage)"
             picture.line = pauseReason ?? ""
@@ -384,7 +384,7 @@ public final class MatchEngine {
         let call = ChatCall(url: seat.completionsURL, apiKey: seat.apiKey, model: seat.model,
                             system: language.prompt(prompt.system), user: prompt.user,
                             selfNotes: seat.side == .white ? whiteSelfNotes : blackSelfNotes,
-                            route: seat.route, gameAdvice: gameMemory.advice(for: seat))
+                            route: seat.route, gameAdvice: gameMemory.advice(for: seat), effort: "high")
         do {
             let text = try await complete(call, context: "План на следующую партию · \(seat.side == .white ? "белые" : "чёрные") · \(seat.name)", timeout: learningTimeout)
             guard !stopped, !Task.isCancelled else { return }
@@ -436,7 +436,7 @@ public final class MatchEngine {
             apiKey: host.apiKey,
             model: host.model,
             system: language.prompt(prompt.system + "\n" + style.instruction),
-            user: context, route: host.route
+            user: context, route: host.route, effort: "low"
         )
         let text: String
         do {
@@ -481,7 +481,7 @@ public final class MatchEngine {
         return ChatCall(url: seat.completionsURL, apiKey: seat.apiKey, model: seat.model,
                         system: language.prompt(prompt.system), user: prompt.user,
                         selfNotes: side == .white ? whiteSelfNotes : blackSelfNotes, route: seat.route,
-                        gameAdvice: gameMemory.advice(for: seat))
+                        gameAdvice: gameMemory.advice(for: seat), effort: "high")
     }
 
     private func fallback(for user: String, style: CommentaryStyle, variation: Int) -> String {
