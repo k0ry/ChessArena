@@ -2,6 +2,12 @@ import AppKit
 import CoreVideo
 import Metal
 import SceneKit
+import Combine
+import simd
+
+public enum CameraRotationAxis: String, CaseIterable, Codable {
+    case x, y, z
+}
 
 public enum ArenaPalette {
     public static let cold = NSColor(calibratedRed: 0.62, green: 0.88, blue: 1.0, alpha: 1)
@@ -18,13 +24,16 @@ public enum ArenaPalette {
     }
 }
 
-public final class BoardScene {
+public final class BoardScene: ObservableObject {
     public let scene = SCNScene()
     public let cameraNode = SCNNode()
     public private(set) var isCameraManual = false
     private var cameraYaw: Float = 0
     private var cameraPitch: Float = 0
     private var cameraDistance: Float = 18
+    private var cameraRoll: Float = 0
+    @Published public private(set) var selectedCameraAxis: CameraRotationAxis?
+    @Published public private(set) var cameraRevision = 0
     public private(set) var isAnimating = false
     public let boardNode = SCNNode()
     private var pieceNodes: [String: SCNNode] = [:]
@@ -62,27 +71,39 @@ public final class BoardScene {
     public func applyCamera(at time: TimeInterval) {
         guard !isCameraManual else { return }
         cameraNode.position = cameraPosition(at: time)
-        cameraNode.look(at: SCNVector3(0, 0, 0))
+        cameraNode.look(at: SCNVector3(0, 0, 0), up: SCNVector3(0, 1, 0), localFront: SCNVector3(0, 0, -1))
+        cameraRevision &+= 1
     }
 
     public var onCameraChanged: (() -> Void)?
     public var cameraCheckpoint: CameraCheckpoint {
-        CameraCheckpoint(manual: isCameraManual, yaw: cameraYaw, pitch: cameraPitch, distance: cameraDistance)
+        CameraCheckpoint(manual: isCameraManual, yaw: cameraYaw, pitch: cameraPitch, distance: cameraDistance,
+                         roll: cameraRoll, axis: selectedCameraAxis)
     }
     public func restoreCamera(_ saved: CameraCheckpoint) {
-        guard saved.yaw.isFinite, saved.pitch.isFinite, saved.distance.isFinite else { return }
+        guard saved.yaw.isFinite, saved.pitch.isFinite, saved.distance.isFinite, saved.roll?.isFinite != false else { return }
         isCameraManual = saved.manual
         cameraYaw = saved.yaw.truncatingRemainder(dividingBy: 2 * .pi)
         cameraPitch = min(.pi * 0.47, max(.pi / 12, saved.pitch))
         cameraDistance = min(45, max(9, saved.distance))
+        cameraRoll = (saved.roll ?? 0).truncatingRemainder(dividingBy: 2 * .pi)
+        selectedCameraAxis = saved.axis
         if isCameraManual { updateManualCamera() } else { applyCamera(at: 0) }
     }
 
-    public func orbitCamera(yaw: Float, pitch: Float) {
-        guard yaw.isFinite, pitch.isFinite else { return }
+    public func orbitCamera(yaw: Float, pitch: Float, roll: Float = 0) {
+        guard yaw.isFinite, pitch.isFinite, roll.isFinite else { return }
         beginManualCamera()
-        cameraYaw = (cameraYaw + yaw).truncatingRemainder(dividingBy: 2 * .pi)
-        cameraPitch = min(.pi * 0.47, max(.pi / 12, cameraPitch + pitch))
+        if selectedCameraAxis == nil || selectedCameraAxis == .y {
+            cameraYaw = (cameraYaw + yaw).truncatingRemainder(dividingBy: 2 * .pi)
+        }
+        if selectedCameraAxis == nil || selectedCameraAxis == .x {
+            cameraPitch = min(.pi * 0.47, max(.pi / 12, cameraPitch + pitch))
+        }
+        if selectedCameraAxis == .z {
+            let delta = roll != 0 ? roll : (abs(yaw) >= abs(pitch) ? yaw : pitch)
+            cameraRoll = (cameraRoll + delta).truncatingRemainder(dividingBy: 2 * .pi)
+        }
         updateManualCamera()
         onCameraChanged?()
     }
@@ -96,9 +117,30 @@ public final class BoardScene {
     }
 
     public func resetCamera() {
-        isCameraManual = false
-        applyCamera(at: 0)
+        isCameraManual = true
+        cameraYaw = 0
+        cameraPitch = atan2(11.7, 12.85)
+        cameraDistance = sqrt(11.7 * 11.7 + 12.85 * 12.85)
+        cameraRoll = 0
+        selectedCameraAxis = nil
+        updateManualCamera()
         onCameraChanged?()
+    }
+
+    public func selectCameraAxis(_ axis: CameraRotationAxis?) {
+        beginManualCamera()
+        selectedCameraAxis = axis
+        updateManualCamera()
+        onCameraChanged?()
+    }
+
+    /// Trackpad twist uses the same axis restriction as dragging either the board or gizmo.
+    public func rotateCamera(by angle: Float) {
+        orbitCamera(yaw: angle, pitch: selectedCameraAxis == .x ? angle : 0, roll: angle)
+    }
+
+    public func cameraProjection(of vector: SIMD3<Float>) -> SIMD3<Float> {
+        cameraNode.simdOrientation.inverse.act(vector)
     }
 
     private func beginManualCamera() {
@@ -115,7 +157,11 @@ public final class BoardScene {
     private func updateManualCamera() {
         let horizontal = cameraDistance * cos(cameraPitch)
         cameraNode.position = SCNVector3(horizontal * sin(cameraYaw), cameraDistance * sin(cameraPitch), horizontal * cos(cameraYaw))
-        cameraNode.look(at: SCNVector3(0, 0, 0))
+        // Rebuild orientation from absolute angles: look(at:) can retain roll and introduce drift.
+        cameraNode.simdOrientation = simd_quatf(angle: cameraYaw, axis: SIMD3(0, 1, 0))
+            * simd_quatf(angle: -cameraPitch, axis: SIMD3(1, 0, 0))
+            * simd_quatf(angle: cameraRoll, axis: SIMD3(0, 0, 1))
+        cameraRevision &+= 1
     }
 
     public func setThinking(_ side: Side?) {

@@ -105,7 +105,8 @@ final class LocalCLIProcess: @unchecked Sendable {
             if waited == child {
                 reaped = true
                 try drain(out[0], into: &stdout); try drain(err[0], into: &stderr)
-                return CLIOutput(stdout: stdout, stderr: stderr, status: status)
+                let exitCode = (status & 0x7f) == 0 ? ((status >> 8) & 0xff) : (128 + (status & 0x7f))
+                return CLIOutput(stdout: stdout, stderr: stderr, status: exitCode)
             }
             if waited < 0 && errno != EINTR { throw ChatError.cli(.execution) }
             var fds = [pollfd(fd: out[0], events: Int16(POLLIN), revents: 0), pollfd(fd: err[0], events: Int16(POLLIN), revents: 0)]

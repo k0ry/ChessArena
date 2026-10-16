@@ -88,6 +88,7 @@ final class MatchRuntime: ObservableObject {
     private var savingEnabled = true
     private var saveFailed = false
     private var savedGame: GameCheckpoint?
+    private var gameMemory = GameMemory()
 
     func loadKeys() {
         guard !loaded else { return }
@@ -106,6 +107,7 @@ final class MatchRuntime: ObservableObject {
                 series = saved.series
                 showResultSplash = saved.series.result != nil
                 savedGame = saved.game
+                gameMemory = saved.gameMemory ?? saved.game?.gameMemory ?? GameMemory()
                 scene.restoreCamera(saved.camera)
                 if let game = saved.game {
                     scene.show(position: game.referee.position)
@@ -149,7 +151,7 @@ final class MatchRuntime: ObservableObject {
     /// Called synchronously after game mutations, once a second for the clock, and on quit.
     func saveState() {
         guard loaded, !restoring, savingEnabled else { return }
-        if let engine { savedGame = engine.checkpoint }
+        if let engine { savedGame = engine.checkpoint; gameMemory = engine.gameMemory }
         if let end = savedGame?.referee.end, let round = series.roundID,
            series.complete(round: round, result: end, now: Date().timeIntervalSinceReferenceDate, startIntermission: false) {
             nextGameIn = nil
@@ -166,7 +168,7 @@ final class MatchRuntime: ObservableObject {
         }
         let saved = SavedSession(game: savedGame, series: series, white: whitePlayer, black: blackPlayer,
                                  hostModel: hostPlayer.model, language: language, useChatGPTLogin: useChatGPTLogin,
-                                 camera: scene.cameraCheckpoint, hostProvider: hostPlayer.provider)
+                                 camera: scene.cameraCheckpoint, hostProvider: hostPlayer.provider, gameMemory: gameMemory)
         do {
             try sessionStore.save(saved)
             if saveFailed { persistenceError = nil; saveFailed = false }
@@ -230,7 +232,7 @@ final class MatchRuntime: ObservableObject {
         engine?.onStateChanged = nil
         engine?.onGameEnded = nil
         engine?.stop()
-        if let engine { picture = engine.picture; savedGame = engine.checkpoint }
+        if let engine { picture = engine.picture; savedGame = engine.checkpoint; gameMemory = engine.gameMemory }
         voice.stop()
         if let engine { finishArchive(engine) }
         engine = nil
@@ -268,7 +270,8 @@ final class MatchRuntime: ObservableObject {
             archive: archive,
             white: white,
             black: black,
-            host: configuredHost
+            host: configuredHost,
+            gameMemory: gameMemory
         )
         match.animationDuration = 1.2
         match.modelLog = modelLog
@@ -433,6 +436,8 @@ final class MatchRuntime: ObservableObject {
             status = language.text("Следующая партия через \(seconds) с", "Next game in \(seconds) s")
         } else if engine.phase == "summary" {
             status = language.text("Итоги партии · комментатор", "Post-game commentary")
+        } else if engine.phase == "learning" {
+            status = language.text("Игроки сохраняют планы на следующую партию…", "Players are saving plans for the next game…")
         } else if engine.paused {
             status = engine.pauseReason ?? language.text("Автоматический повтор запроса…", "Retrying automatically…")
         } else {

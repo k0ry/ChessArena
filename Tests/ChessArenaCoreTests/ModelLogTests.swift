@@ -13,11 +13,14 @@ final class ModelLogTests: XCTestCase {
         var request = call()
         request.system = "Do not repeat private-test-secret"
         request.selfNotes = "Castle soon. private-test-secret"
+        request.gameAdvice = "Check threats. private-test-secret"
         let id = log.begin(request, context: "Ход белых", endpoint: URL(string: "https://user:password@example.com/v1/responses?api_key=secret#fragment")!)
         XCTAssertEqual(log.entries[0].status, .pending)
         XCTAssertEqual(log.entries[0].endpoint, "https://example.com/v1/responses")
         XCTAssertFalse(log.entries[0].text.contains(request.apiKey))
         XCTAssertEqual(log.entries[0].selfNotes, "Castle soon. [REDACTED]")
+        XCTAssertEqual(log.entries[0].gameAdvice, "Check threats. [REDACTED]")
+        XCTAssertTrue(log.entries[0].text.contains("ПЛАН ИЗ ПРОШЛЫХ ПАРТИЙ"))
         log.succeed(id, response: "e2e4 private-test-secret Bearer opaque-token xai-1234567890", secrets: [request.apiKey])
         let entry = try XCTUnwrap(log.entries.first)
         XCTAssertEqual(entry.status, .received)

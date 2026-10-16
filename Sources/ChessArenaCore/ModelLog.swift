@@ -11,6 +11,7 @@ public struct ModelLogEntry: Identifiable, Equatable {
     public var system: String
     public var user: String
     public var selfNotes: String? = nil
+    public var gameAdvice: String? = nil
     public var response: String?
     public var error: String?
     public var status: Status = .pending
@@ -22,6 +23,7 @@ public struct ModelLogEntry: Identifiable, Equatable {
         if let duration { parts.append(String(format: "Время: %.2f с", duration)) }
         parts += ["SYSTEM / INSTRUCTIONS\n\(system)", "USER\n\(user)"]
         if let selfNotes, !selfNotes.isEmpty { parts.append("ЗАМЕТКИ ЭТОГО ИГРОКА (отдельное сообщение)\n\(selfNotes)") }
+        if let gameAdvice, !gameAdvice.isEmpty { parts.append("ПЛАН ИЗ ПРОШЛЫХ ПАРТИЙ (отдельное сообщение)\n\(gameAdvice)") }
         if let response { parts.append("ОТВЕТ МОДЕЛИ\n\(response)") }
         if let error { parts.append("ОШИБКА\n\(error)") }
         return parts.joined(separator: "\n\n")
@@ -43,7 +45,7 @@ public final class ModelLog: ObservableObject {
         func clean(_ text: String) -> String { Self.sanitize(text, secrets: [call.apiKey]) }
         let entry = ModelLogEntry(id: id, date: Date(), context: clean(context), model: clean(call.model),
                                   endpoint: clean(url?.string ?? ""), system: clean(call.system), user: clean(call.user),
-                                  selfNotes: call.selfNotes.map(clean))
+                                  selfNotes: call.selfNotes.map(clean), gameAdvice: call.gameAdvice.map(clean))
         entries.insert(entry, at: 0)
         if entries.count > capacity { entries.removeLast(entries.count - capacity) }
         return id

@@ -63,7 +63,7 @@ public final class GeminiConnection: ObservableObject {
                     verifiedModels.insert(verified)
                     status = "Локальный Gemini ответил. Дополнительные AI credits отключены."
                 } else {
-                    status = "CLI 1.3.3 найден, каталог загружен. Проверьте выбранную модель тестовым ходом."
+                    status = "Локальный CLI проверен, каталог загружен. Проверьте выбранную модель тестовым ходом."
                 }
             } catch is CancellationError { }
             catch {

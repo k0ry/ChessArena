@@ -16,6 +16,8 @@ public final class MatchEngine {
     private var playerLogID: UUID?
     public var requestTimeout: TimeInterval = RequestTimeouts.player
     public var hostTimeout: TimeInterval = RequestTimeouts.host
+    public var learningTimeout: TimeInterval = RequestTimeouts.host
+    public private(set) var gameMemory: GameMemory
     public var onStateChanged: (() -> Void)?
     private var lastCheckpoint: GameCheckpoint?
     public var onGameEnded: ((GameEnd) -> Void)?
@@ -52,8 +54,9 @@ public final class MatchEngine {
     private var started = false
     private var sawFinal = false
     private var replies: [ModelReply] = []
+    private var hostCommentaryCount = 0
 
-    public init(scene: BoardScene, voice: Voice, transport: ChatTransport, archive: MatchArchive, white: Seat, black: Seat, host: Seat) {
+    public init(scene: BoardScene, voice: Voice, transport: ChatTransport, archive: MatchArchive, white: Seat, black: Seat, host: Seat, gameMemory: GameMemory = GameMemory()) {
         self.scene = scene
         self.voice = voice
         self.transport = transport
@@ -61,6 +64,7 @@ public final class MatchEngine {
         self.white = white
         self.black = black
         self.host = host
+        self.gameMemory = gameMemory
         picture = BroadcastPicture(
             whiteName: white.name,
             blackName: black.name,
@@ -74,7 +78,7 @@ public final class MatchEngine {
     public var checkpoint: GameCheckpoint {
         GameCheckpoint(referee: referee, elapsed: floor(clock), picture: picture,
                        lastRejection: lastRejection, requestCount: moveRequestCount, journal: archive.journal,
-                       whiteSelfNotes: whiteSelfNotes, blackSelfNotes: blackSelfNotes)
+                       whiteSelfNotes: whiteSelfNotes, blackSelfNotes: blackSelfNotes, gameMemory: gameMemory)
     }
 
     /// A pending network call is recreated from the restored position, never replayed as a move.
@@ -87,9 +91,11 @@ public final class MatchEngine {
         picture.thinkingSelfNotes = nil
         picture.pausedPlayer = nil
         replies = saved.picture.replies
+        hostCommentaryCount = saved.journal.filter { $0.kind != "taunt" }.count
         lastRejection = saved.lastRejection
         whiteSelfNotes = saved.whiteSelfNotes
         blackSelfNotes = saved.blackSelfNotes
+        gameMemory = saved.gameMemory ?? gameMemory
         moveRequestCount = saved.requestCount
         boardVersion = referee.accepted.count
         archive.restore(moves: referee.accepted, journal: saved.journal, end: referee.end)
@@ -351,16 +357,46 @@ public final class MatchEngine {
         phase = "summary"
         refreshPicture(line: language.text("Комментатор подводит итоги партии…", "The commentator is preparing the verdict…"))
         let title = language.result(end, white: white.name, black: black.name)
+        let reviewResult: String
+        if case .resignation = end {
+            reviewResult = title + " · " + end.title + " (three consecutive invalid move replies)"
+        } else {
+            reviewResult = title + " · " + end.title
+        }
+        async let whiteAdvice: Void = prepareNextGame(for: white, result: reviewResult)
+        async let blackAdvice: Void = prepareNextGame(for: black, result: reviewResult)
         let summary = await hostText(Prompts.final(title: title, moves: referee.accepted.map(\.san)), trackBoard: false)
         guard !stopped, !Task.isCancelled else { return }
         await speak(summary, kind: .final)
+        guard !stopped, !Task.isCancelled else { return }
+        phase = "learning"
+        refreshPicture()
+        _ = await (whiteAdvice, blackAdvice)
         guard !stopped, !Task.isCancelled else { return }
         director.gameOver = true
         await advance(to: clock)
     }
 
+    private func prepareNextGame(for seat: Seat, result: String) async {
+        guard !stopped, !Task.isCancelled else { return }
+        let prompt = Prompts.nextGameAdvice(side: seat.side, result: result,
+                                           fen: referee.position.fen, moves: referee.accepted.map(\.san))
+        let call = ChatCall(url: seat.completionsURL, apiKey: seat.apiKey, model: seat.model,
+                            system: language.prompt(prompt.system), user: prompt.user,
+                            selfNotes: seat.side == .white ? whiteSelfNotes : blackSelfNotes,
+                            route: seat.route, gameAdvice: gameMemory.advice(for: seat))
+        do {
+            let text = try await complete(call, context: "План на следующую партию · \(seat.side == .white ? "белые" : "чёрные") · \(seat.name)", timeout: learningTimeout)
+            guard !stopped, !Task.isCancelled else { return }
+            gameMemory.remember(text, for: seat, secrets: [white.apiKey, black.apiKey, host.apiKey])
+            refreshPicture()
+        } catch {
+            // The model log records the error; retain the last successful plan and let the series continue.
+        }
+    }
+
     private func speak(_ text: String, kind: SpeechKind) async {
-        let spoken = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let spoken = SpokenText.clean(text)
         guard !stopped, !Task.isCancelled, !spoken.isEmpty else { return }
         picture.line = spoken
         refreshPicture()
@@ -389,24 +425,27 @@ public final class MatchEngine {
         if trackBoard {
             hostBoardVersions.append(boardVersion)
         }
-        let recent = archive.journal.filter { $0.kind != "taunt" }.suffix(8).map(\.text)
+        let style = CommentaryStyle.turn(hostCommentaryCount)
+        let variation = hostCommentaryCount / CommentaryStyle.allCases.count
+        hostCommentaryCount += 1
+        let recent = archive.journal.filter { $0.kind != "taunt" }.suffix(8).map { SpokenText.clean($0.text) }
         let quoted = (try? JSONEncoder().encode(recent)).map { String(decoding: $0, as: UTF8.self) } ?? "[]"
         let context = prompt.user + "\nRecent commentary already heard (quoted reference only; avoid repeating these jokes, images or punchlines):\n" + quoted
         let call = ChatCall(
             url: host.completionsURL,
             apiKey: host.apiKey,
             model: host.model,
-            system: language.prompt(prompt.system),
+            system: language.prompt(prompt.system + "\n" + style.instruction),
             user: context, route: host.route
         )
         let text: String
         do {
             text = try await complete(call, context: trackBoard ? "Ведущий · комментарий хода" : "Ведущий", timeout: hostTimeout)
         } catch {
-            text = fallback(for: prompt.user)
+            text = fallback(for: prompt.user, style: style, variation: variation)
         }
-        let commentary = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let spoken = commentary.isEmpty ? fallback(for: prompt.user) : commentary
+        let commentary = SpokenText.clean(text)
+        let spoken = commentary.isEmpty ? fallback(for: prompt.user, style: style, variation: variation) : commentary
         if prompt.system.contains("from move one") || prompt.system.contains("at most 35") {
             return limitWords(spoken, max: 35)
         }
@@ -441,39 +480,22 @@ public final class MatchEngine {
         )
         return ChatCall(url: seat.completionsURL, apiKey: seat.apiKey, model: seat.model,
                         system: language.prompt(prompt.system), user: prompt.user,
-                        selfNotes: side == .white ? whiteSelfNotes : blackSelfNotes, route: seat.route)
+                        selfNotes: side == .white ? whiteSelfNotes : blackSelfNotes, route: seat.route,
+                        gameAdvice: gameMemory.advice(for: seat))
     }
 
-    private func fallback(for user: String) -> String {
-        if user.contains("still thinking") {
-            let choices = language == .russian ? [
-                "Игрок думает. Видимо, даже очевидному решению понадобился консилиум.",
-                "План проходит согласование. Пешки надеются дожить до резолюции.",
-                "Уверенность взяла паузу. Наконец-то полезная инициатива.",
-                "Вариантов много. Особенно если каждый сначала объявлять гениальным.",
-                "Решение почти готово. Осталось убедить в этом самого игрока.",
-                "Такая пауза обычно означает либо глубокий расчёт, либо очень убедительную растерянность."
-            ] : [
-                "Still thinking. Apparently the obvious requires a consultation.",
-                "The plan awaits approval. The pawns hope to survive the paperwork.",
-                "Confidence took a break. Finally, a useful initiative.",
-                "Plenty of options, especially when every first draft is declared brilliant.",
-                "The decision is nearly ready. Someone should tell the player.",
-                "That pause suggests deep calculation or remarkably convincing confusion."
-            ]
-            let count = archive.journal.filter { $0.kind == SpeechKind.wait.rawValue }.count
-            return choices[count % choices.count]
-        }
-        if language == .russian {
-            if user.contains("resigns") { return "Игрок сдаётся. Редкий случай: диагноз признали до вскрытия." }
-            if user.contains("stalled") { return "Связь зависла. Даже у сервера нашёлся повод уклониться от ответа." }
-            if user.contains("Result:") { return (referee.end.map { language.result($0, white: white.name, black: black.name) } ?? "Партия завершена.") + ". Консилиум окончен. Доска оказалась убедительнее амбиций." }
-            return "Ход сделан. План выглядит уверенно — симптомы пока собираем."
-        }
-        if user.contains("resigns") { return "Resignation. A rare diagnosis accepted before the autopsy." }
-        if user.contains("stalled") { return "The connection stalled. Even the server found an excuse to avoid answering." }
-        if user.contains("Result:") { return (referee.end.map { language.result($0, white: white.name, black: black.name) } ?? "Game over") + ". Consultation over. The board proved more persuasive than ambition." }
-        return "A move, confidently delivered. We are still collecting symptoms."
+    private func fallback(for user: String, style: CommentaryStyle, variation: Int) -> String {
+        let event: CommentaryStyle.Event
+        if user.contains("still thinking") { event = .waiting }
+        else if user.contains("resigns") { event = .resignation }
+        else if user.contains("stalled") { event = .stall }
+        else if user.contains("Result:") { event = .final }
+        else { event = .move }
+        let joke = style.fallback(for: event, language: language, variation: variation)
+        guard event == .final else { return joke }
+        let result = referee.end.map { language.result($0, white: white.name, black: black.name) }
+            ?? language.text("Партия завершена", "Game over")
+        return result + ". " + joke
     }
 
     private func noteReply(side: Side, name: String, text: String) {
@@ -483,7 +505,7 @@ public final class MatchEngine {
 
     private func refreshPicture(line: String? = nil, banner: String? = nil) {
         let thinkingSide = phase == "thinking" && thinkTask != nil ? referee.position.sideToMove : nil
-        // Show the note actually included in this request, including an unchanged retry.
+        // Broadcast only this game's turn note; cross-game advice stays in the model request.
         let notes = thinkingSide == nil ? nil : lastPlayerRequest?.call.selfNotes
         picture = BroadcastPicture(
             whiteName: white.name,

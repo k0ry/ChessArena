@@ -76,7 +76,7 @@ struct ControlView: View {
                     .help("Отменить ожидание и повторить последний запрос игроку, чей сейчас ход")
                 Spacer()
                 Button("Сбросить вид", systemImage: "viewfinder") { runtime.scene.resetCamera() }
-                    .help("Исходный ракурс. Вращение: перетащите доску; масштаб: колесо мыши или жест на трекпаде")
+                    .help("Выровнять край доски параллельно низу окна и зафиксировать ракурс. Ось вращения выбирается на сфере справа от доски")
             }
             Text("Ход \(runtime.moveNumber) · 1920 × 1080")
                 .font(.caption.monospaced()).foregroundStyle(.secondary)

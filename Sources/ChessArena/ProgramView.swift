@@ -13,6 +13,9 @@ struct ProgramView: View {
             ZStack {
                 BoardContainer(scene: runtime.scene)
                 ProgramTextOverlay(picture: runtime.picture, language: runtime.language)
+                CameraOrbitControl(scene: runtime.scene, language: runtime.language)
+                    .padding(.trailing, 18)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -223,7 +226,7 @@ final class InteractiveBoardView: SCNView {
     }
 
     override func rotate(with event: NSEvent) {
-        arena?.orbitCamera(yaw: Float(event.rotation) * .pi / 180, pitch: 0)
+        arena?.rotateCamera(by: Float(event.rotation) * .pi / 180)
     }
 
     override func resetCursorRects() { addCursorRect(bounds, cursor: .openHand) }

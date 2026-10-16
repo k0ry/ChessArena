@@ -11,6 +11,8 @@ final class GeminiCLITests: XCTestCase {
         let text = try GeminiCLI.parse(output(#"{"status":"SUCCESS","structured_output":{"move":"e2e4","taunt":"Go."},"response":"metadata must not leak"}"#))
         XCTAssertEqual(ChatParser.moveIntent(from: text)?.move, "e2e4")
         XCTAssertFalse(text.contains("metadata"))
+        XCTAssertEqual(try GeminiCLI.parse(output(#"{"status":"SUCCESS","num_turns":1,"response":"Next game, develop before attacking."}"#)),
+                       "Next game, develop before attacking.")
         XCTAssertThrowsError(try GeminiCLI.parse(output(#"{"status":"SUCCESS","response":"partial"}"#, "[agy] print timeout after 30s"))) {
             XCTAssertEqual($0 as? ChatError, .cli(.timeout))
         }
@@ -27,8 +29,14 @@ final class GeminiCLITests: XCTestCase {
     }
 
     func testCatalogAndEnvironmentExcludeKeys() {
-        let models = GeminiCLI.parseModels(Data("Fetching available models...\ngemini-3.8-flash-high\tFlash\nclaude-opus\tClaude\ngemini-3.8-flash-high\tDuplicate\ngemini-foo;echo\tInvalid\n".utf8))
-        XCTAssertEqual(models.map(\.id), ["gemini-3.8-flash-high"])
+        let models = GeminiCLI.parseModels(Data("Fetching available models...\ngemini-4-argon-medium\tGemini 4 Argon (Medium)\ngemini-3.8-flash-high\tFlash\nclaude-opus\tClaude\ngemini-3.8-flash-high\tDuplicate\ngemini-foo;echo\tInvalid\n".utf8))
+        XCTAssertEqual(models.map(\.id), ["gemini-4-argon-medium", "gemini-3.8-flash-high"])
+        XCTAssertTrue(GeminiCLI.isSupportedVersion("1.3.3\n"))
+        XCTAssertTrue(GeminiCLI.isSupportedVersion("1.4.0\n"))
+        XCTAssertTrue(GeminiCLI.isSupportedVersion("1.4.1-build123"))
+        XCTAssertFalse(GeminiCLI.isSupportedVersion("1.3.2"))
+        XCTAssertFalse(GeminiCLI.isSupportedVersion("2.0.0"))
+        XCTAssertEqual(GeminiCLIError.classify("Error: timed out waiting for available models"), .timeout)
         let env = GeminiCLI.environment(from: ["HOME": "/test", "GEMINI_API_KEY": "secret", "OPENAI_API_KEY": "secret", "AGY_LLM_GATEWAY_URL": "remote", "HTTPS_PROXY": "http://localhost:1234"])
         XCTAssertEqual(env["HOME"], "/test")
         XCTAssertEqual(env["HTTPS_PROXY"], "http://localhost:1234")
@@ -99,15 +107,17 @@ final class GeminiCLITests: XCTestCase {
         /usr/bin/grep -F 'tools: []' .agents/agents/chessarena-player.md >/dev/null || exit 10
         test "$1" = '--print' || exit 11
         case "$2" in *PRIVATE_NOTES*) ;; *) exit 12;; esac
+        case "$2" in *NEXT_GAME_ADVICE*) ;; *) exit 15;; esac
         test "$3" = '--model' || exit 13
         test "$4" = 'gemini-selected' || exit 14
         printf '%s' '{"status":"SUCCESS","num_turns":1,"response":"{\\"move\\":\\"e2e4\\",\\"taunt\\":\\"Go.\\"}"}'
         """, in: directory)
         let cli = GeminiCLI(binary: script.path, home: directory)
-        let response = try await cli.complete(ChatCall(url: URL(string: "local-cli://antigravity")!, apiKey: "NOT_FOR_CLI", model: "gemini-selected", system: "chess", user: "position", selfNotes: "PRIVATE_NOTES", route: .geminiCLI))
+        let response = try await cli.complete(ChatCall(url: URL(string: "local-cli://antigravity")!, apiKey: "NOT_FOR_CLI", model: "gemini-selected", system: "chess", user: "position", selfNotes: "PRIVATE_NOTES", route: .geminiCLI, gameAdvice: "NEXT_GAME_ADVICE"))
         XCTAssertEqual(ChatParser.moveIntent(from: response)?.move, "e2e4")
     }
 
+    @MainActor
     func testMissingCLIRouteNeverFallsBackToHTTP() async throws {
         let http = ScriptedChat()
         let transport = ArenaChatTransport(connection: nil, api: http)

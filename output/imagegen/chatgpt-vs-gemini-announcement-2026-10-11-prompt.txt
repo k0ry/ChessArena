@@ -1,0 +1,11 @@
+Generator: built-in image_gen
+
+Use case: ads-marketing.
+Create a finished square 1:1 promotional image for a Russian Telegram post announcing a live AI chess match in the independent ChessArena show: ChatGPT versus Gemini. High-end cinematic futuristic 3D chess poster, immediately readable on a phone.
+Composition: bold editorial typography in the upper third, dramatic close low-angle view of a chessboard in the lower two thirds, two large beautifully designed opposing chess kings with a few supporting knights and pawns. Recognizable precise chess silhouettes, premium brushed titanium, clean sculptural geometry, luminous rings around the bases. ChatGPT side has emerald green and icy cyan lighting; Gemini side has electric blue and violet lighting. Dark charcoal arena with subtle perspective grid, atmospheric haze and restrained sparks, strong contrast, rich yet controlled glow, crisp highly polished rendering. An elegant small OpenAI knot emblem on the left king and Gemini four-point star emblem on the right king. The kings face off across the board, no people or robots.
+Typography is integrated professionally, solid sharp letterforms without distortion, ample margin from edges:
+small top label exactly "CHESS / ARENA";
+very large main matchup in two balanced lines "ChatGPT" and "Gemini", with a prominent "VS" separating them; all three visible at thumbnail scale;
+bottom caption exactly "ШАХМАТНЫЙ БОЙ";
+compact red live badge exactly "LIVE" with a small red dot.
+Keep a clear hierarchy and make the matchup names the largest text. Premium tournament announcement, dramatic anticipation, neither side winning yet. No scores, no date, no invented schedule, no additional copy, no watermark, no clutter. Square full-bleed image.

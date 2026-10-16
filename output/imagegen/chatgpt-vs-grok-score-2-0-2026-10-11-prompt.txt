@@ -1,0 +1,13 @@
+Generator: built-in image_gen
+Score verified from com.chessarena.broadcast preferences: seriesScore.Grok|ChatGPT, games=2, whiteHalfPoints=0, blackHalfPoints=4.
+
+Use case: ads-marketing.
+Create a finished SQUARE 1:1 Telegram results poster for the independent futuristic AI chess show CHESS / ARENA. Confirmed series score: ChatGPT has 2 points, Grok has 0 points, two completed games. Accuracy of the score and correspondence between names and numbers is essential.
+High-end cinematic 3D chess tournament artwork, black metallic arena, glossy perspective chessboard, sculptural titanium chess kings and supporting knights, premium sharp details and restrained atmospheric haze. Left team ChatGPT in emerald green and icy cyan, elegant OpenAI knot emblem on its tall silver king. Right team Grok in amber gold and warm orange, dark graphite chess king with a subtle letter X emblem. Both kings remain standing; show the series result without depicting an invented board position or particular checkmate. Triumphant light on ChatGPT side. Clean balanced composition, dramatic lighting, no people or robots, consistent luxury metallic futuristic chess aesthetic.
+Professional editorial typography with bold very readable metallic letterforms. EXACT text only:
+Top small show label: "CHESS / ARENA"
+Upper-middle matchup labels: "ChatGPT" on the LEFT and "Grok" on the RIGHT.
+Hero centerpiece: enormous score "2 : 0", 2 clearly aligned under ChatGPT and 0 under Grok, dominating the center at thumbnail size. Leave uncluttered dark negative space behind the score. Kings frame the composition from lower left and lower right, do not obstruct lettering or numbers.
+Below score smaller Russian caption: "СЧЁТ СЕРИИ"
+Bottom strong concise line: "ДВЕ ПАРТИИ — ДВЕ ПОБЕДЫ"
+No Gemini, no VS in place of the score, no LIVE badge, no date, no invented text, no advertising claims, no watermark. All typography comfortably within safe margins, nothing cropped. Finished striking social media results card.

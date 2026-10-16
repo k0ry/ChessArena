@@ -1,0 +1,15 @@
+Generator: built-in image_gen
+Result supplied by user: Gemini Flash 3.8 High defeated GPT Sol 6.1, 2:0.
+
+Use case: ads-marketing.
+Create a finished square 1:1 Telegram results poster for the independent AI chess show CHESS / ARENA.
+User-provided result, reproduce exactly: Gemini Flash 3.8 High defeated GPT Sol 6.1 by 2:0.
+Premium cinematic futuristic 3D chess aesthetic, dark graphite arena, reflective chessboard, imposing finely sculpted metal chess kings framing the left and right edges. Left winner Gemini has electric violet and blue illumination and a subtle four-point Gemini star emblem on its king; right GPT has emerald and cyan illumination with a subtle OpenAI knot emblem on its king. Focus light on the Gemini side. Restrained atmosphere, polished metal, rich dark shadows, clean high contrast. Only two main kings with subtle supporting chess pieces. Keep kings standing: no invented particular checkmate position.
+Typography must be exact and readable on a phone. Clear scoreboard layout with matching left/right columns and plenty of negative space:
+Top small "CHESS / ARENA".
+Left player name in two lines: "Gemini" then "Flash 3.8 High".
+Right player name in two lines: "GPT" then "Sol 6.1".
+Huge central hero score "2 : 0", with 2 precisely aligned below Gemini on the LEFT and 0 below GPT on the RIGHT.
+Below the score: "GEMINI ПОБЕЖДАЕТ".
+Bottom caption: "ДВЕ ПАРТИИ — ДВЕ ПОБЕДЫ".
+Elegant crisp metallic typography with balanced spacing, readable model versions, comfortable safe margins. The score is the largest element. All written words only from the specified text list. No English slogans on banners. No LIVE badge, no date, no Grok branding, no watermarks, no extra text. Celebratory but tasteful professional tournament result card, not a poster mockup.

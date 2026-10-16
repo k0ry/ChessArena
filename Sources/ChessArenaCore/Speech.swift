@@ -1,6 +1,38 @@
 import AVFoundation
 import Foundation
 
+enum SpokenText {
+    /// Models occasionally return another layer of JSON escaping inside their text.
+    /// Clean only broadcast speech; preserve the original response in the model log.
+    static func clean(_ source: String) -> String {
+        var text = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        let escapes = try! NSRegularExpression(pattern: #"(?:\\u[0-9a-fA-F]{4})+|\\["\\/bfnrt]"#)
+        for _ in 0..<3 {
+            if let decoded = try? JSONDecoder().decode(String.self, from: Data(text.utf8)) {
+                text = decoded
+            }
+            let matches = escapes.matches(in: text, range: NSRange(text.startIndex..., in: text))
+            for match in matches.reversed() {
+                guard let range = Range(match.range, in: text) else { continue }
+                let token = String(text[range])
+                if let decoded = try? JSONDecoder().decode(String.self, from: Data(("\"" + token + "\"").utf8)) {
+                    text.replaceSubrange(range, with: decoded)
+                }
+            }
+        }
+        // Some replies spell out the escape name or use HTML/Unicode variants.
+        // None of these formatting artifacts belong in chess broadcast speech.
+        text = text.replacingOccurrences(of: #"(?i)&(?:bsol|#0*92|#x0*5c);"#, with: " ", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"(?i)(?<![\p{L}\p{N}_])(?:back[\s-]*slash(?:es)?|б[еэ]к[\s-]*сл[еэ]ш(?:и|ей|а|ем|у)?)(?![\p{L}\p{N}_])"#,
+                                        with: " ", options: .regularExpression)
+        return text.replacingOccurrences(of: #"[\\＼﹨∖⧵⧹]"#, with: " ", options: .regularExpression)
+            .components(separatedBy: .controlCharacters).joined(separator: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+([,.!?;:…])"#, with: "$1", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 public enum SpeechKind: String, Equatable, Sendable {
     case tone
     case move
@@ -90,6 +122,7 @@ public final class SystemVoice: NSObject, Voice {
 
     public func speak(_ text: String, kind: SpeechKind) async -> [Int16] {
         stop()
+        guard let utterance = Self.makeUtterance(text, language: language) else { return [] }
         let id = UUID()
         utteranceID = id
         samples = []; pendingBuffers = 0; synthesisFinished = false
@@ -98,9 +131,6 @@ public final class SystemVoice: NSObject, Voice {
             guard !Task.isCancelled else { stop(); return [] }
             return await withCheckedContinuation { continuation in
                 self.continuation = continuation
-                let utterance = AVSpeechUtterance(string: text)
-                utterance.voice = AVSpeechSynthesisVoice(language: language.rawValue)
-                utterance.rate = AVSpeechUtteranceDefaultSpeechRate
                 synthesizer.write(utterance) { [weak self] buffer in
                     guard let pcm = buffer as? AVAudioPCMBuffer else { return }
                     Task { @MainActor [weak self] in
@@ -121,6 +151,16 @@ public final class SystemVoice: NSObject, Voice {
                 self.stop()
             }
         }
+    }
+
+    /// The last boundary before AVSpeechSynthesizer, including direct sound checks.
+    static func makeUtterance(_ text: String, language: BroadcastLanguage) -> AVSpeechUtterance? {
+        let spoken = SpokenText.clean(text)
+        guard !spoken.isEmpty else { return nil }
+        let utterance = AVSpeechUtterance(string: spoken)
+        utterance.voice = AVSpeechSynthesisVoice(language: language.rawValue)
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+        return utterance
     }
 
     private func finishIfReady() {

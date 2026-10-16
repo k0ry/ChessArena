@@ -10,6 +10,7 @@ public struct GameCheckpoint: Codable, Equatable {
     public var journal: [JournalEntry]
     public var whiteSelfNotes: String? = nil
     public var blackSelfNotes: String? = nil
+    public var gameMemory: GameMemory? = nil
 }
 
 public struct CameraCheckpoint: Codable, Equatable {
@@ -17,6 +18,8 @@ public struct CameraCheckpoint: Codable, Equatable {
     public var yaw: Float
     public var pitch: Float
     public var distance: Float
+    public var roll: Float? = nil
+    public var axis: CameraRotationAxis? = nil
 }
 
 public struct SavedSession: Codable {
@@ -31,14 +34,17 @@ public struct SavedSession: Codable {
     public var language: BroadcastLanguage
     public var useChatGPTLogin: Bool
     public var camera: CameraCheckpoint
+    public var gameMemory: GameMemory?
 
     public init(game: GameCheckpoint?, series: MatchSeries, white: PlayerConfiguration,
                 black: PlayerConfiguration, hostModel: String, language: BroadcastLanguage,
-                useChatGPTLogin: Bool, camera: CameraCheckpoint, hostProvider: NeuralProvider = .grok) {
+                useChatGPTLogin: Bool, camera: CameraCheckpoint, hostProvider: NeuralProvider = .grok,
+                gameMemory: GameMemory? = nil) {
         self.game = game; self.series = series; self.white = white; self.black = black
         self.hostModel = hostModel; self.language = language
         self.useChatGPTLogin = useChatGPTLogin; self.camera = camera
         self.hostProvider = hostProvider
+        self.gameMemory = gameMemory
     }
 
     public var hostConfiguration: PlayerConfiguration {
@@ -62,7 +68,7 @@ public final class SessionStore {
         let version = try JSONDecoder().decode(Version.self, from: data)
         guard version.schemaVersion == 1 else { throw SessionStoreError.unsupportedVersion }
         let state = try JSONDecoder().decode(SavedSession.self, from: data)
-        guard state.camera.yaw.isFinite, state.camera.pitch.isFinite, state.camera.distance.isFinite,
+        guard state.camera.yaw.isFinite, state.camera.pitch.isFinite, state.camera.distance.isFinite, state.camera.roll?.isFinite != false,
               !state.series.running || (state.game != nil && state.series.roundID != nil),
               state.series.result == nil || state.series.result == state.game?.referee.end,
               state.series.restartAt?.isFinite != false else { throw SessionStoreError.invalidState }

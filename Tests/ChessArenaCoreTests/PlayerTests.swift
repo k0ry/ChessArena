@@ -21,15 +21,17 @@ final class PlayerTests: XCTestCase {
         try server.start()
         defer { server.stop() }
         let call = ChatCall(url: URL(string: "http://127.0.0.1:\(server.port)/chat/completions")!,
-                            apiKey: "test", model: "test", system: "system", user: "FEN: current", selfNotes: notes)
+                            apiKey: "test", model: "test", system: "system", user: "FEN: current", selfNotes: notes,
+                            gameAdvice: "Protect the king next game.")
         _ = try await URLSessionChatTransport(timeout: 3).complete(call)
         let incoming = try XCTUnwrap(seen.value)
         let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(incoming.bodyText.utf8)) as? [String: Any])
         let messages = try XCTUnwrap(payload["messages"] as? [[String: String]])
-        XCTAssertEqual(messages.count, 3)
+        XCTAssertEqual(messages.count, 4)
         XCTAssertEqual(messages[1], ["role": "user", "content": "FEN: current"])
         XCTAssertEqual(messages[2]["role"], "user")
-        XCTAssertTrue(messages[2]["content"]?.hasSuffix(notes) == true)
+        XCTAssertTrue(messages[2]["content"]?.hasSuffix("Protect the king next game.") == true)
+        XCTAssertTrue(messages[3]["content"]?.hasSuffix(notes) == true)
         XCTAssertEqual(Array(messages.dropFirst()), call.inputMessages)
     }
 

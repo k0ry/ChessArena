@@ -72,6 +72,9 @@ struct ModelLogView: View {
                             }
                             section("SYSTEM / INSTRUCTIONS", selected.system)
                             section("USER", selected.user)
+                            if let advice = selected.gameAdvice, !advice.isEmpty {
+                                section("ПЛАН ИЗ ПРОШЛЫХ ПАРТИЙ · отдельное сообщение", advice)
+                            }
                             if let notes = selected.selfNotes, !notes.isEmpty {
                                 section("ЗАМЕТКИ ЭТОГО ИГРОКА · отдельное сообщение", notes)
                             }

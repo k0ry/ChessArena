@@ -5,6 +5,16 @@ import XCTest
 @testable import ChessArenaCore
 
 final class BroadcastTests: XCTestCase {
+    func testSpokenTextRemovesEscapesWithoutSpeakingBackslashes() {
+        XCTAssertEqual(SpokenText.clean(#"План хорош.\nКороль не согласен.\tСовсем."#), "План хорош. Король не согласен. Совсем.")
+        XCTAssertEqual(SpokenText.clean(#"План \"надёжный\".\\nОчень."#), "План \"надёжный\". Очень.")
+        XCTAssertEqual(SpokenText.clean(#""План.\nДиагноз ясен.""#), "План. Диагноз ясен.")
+        XCTAssertEqual(SpokenText.clean(#"\u041c\u0430\u0442.\nКонсилиум окончен."#), "Мат. Консилиум окончен.")
+        XCTAssertEqual(SpokenText.clean("План \\ сомнительный."), "План сомнительный.")
+        XCTAssertEqual(SpokenText.clean("Qh4# — диагноз. 1/2, а не победа!"), "Qh4# — диагноз. 1/2, а не победа!")
+        XCTAssertEqual(SpokenText.clean(#"\n\t\\"#), "")
+    }
+
     func testLiveGameNeverSchedulesPeriodicRecaps() {
         var director = ChronicleDirector()
         for time in [259.0, 260, 300, 314, 560, 600, 900, 3600, 86400] {
@@ -12,6 +22,20 @@ final class BroadcastTests: XCTestCase {
             XCTAssertEqual(director.phase, .live)
             XCTAssertEqual(director.now, time)
         }
+    }
+
+    @MainActor
+    func testSynthesizerReceivesNoBackslashNamesOrUnicodeVariants() throws {
+        for artifact in ["backslash", "BACKSLASH", "back slash", "back-slash", "backslashes",
+                         "бэк слеш", "бэкслэш", "бекслеш", "＼", "﹨", "∖", "⧵", "⧹",
+                         "&bsol;", "&#92;", "&#x5C;", #"\u005c"#] {
+            let utterance = try XCTUnwrap(SystemVoice.makeUtterance("Ход. \(artifact) План?", language: .russian))
+            XCTAssertEqual(utterance.speechString, "Ход. План?", artifact)
+            XCTAssertNil(SystemVoice.makeUtterance(artifact, language: .russian), artifact)
+            XCTAssertEqual(SpokenText.clean(utterance.speechString), utterance.speechString)
+        }
+        XCTAssertEqual(SpokenText.clean("И снова backslash, король под ударом."), "И снова, король под ударом.")
+        XCTAssertEqual(SpokenText.clean("backslashCounter — имя; 1/2 — счёт."), "backslashCounter — имя; 1/2 — счёт.")
     }
 
     func testReplayRunsFromTheFirstMoveWithSideTints() {
