@@ -5,6 +5,7 @@ import SwiftUI
 struct ProgramTextOverlay: View {
     let picture: BroadcastPicture
     let language: BroadcastLanguage
+    var showThinkingNotes = true
 
     var body: some View {
         VStack {
@@ -35,33 +36,38 @@ struct ProgramTextOverlay: View {
             if let banner = picture.banner {
                 Text(banner)
                     .font(.system(size: 56, weight: .bold, design: .serif))
-                    .padding(.bottom, 12)
+                    .padding(.bottom, showThinkingNotes ? 12 : 42)
             }
-            VStack(spacing: 10) {
-                if let side = picture.thinkingSide {
-                    let name = side == .white ? picture.whiteName : picture.blackName
-                    let sideName = language.text(side == .white ? "БЕЛЫЕ" : "ЧЁРНЫЕ", side == .white ? "WHITE" : "BLACK")
-                    Text("\(name.uppercased()) · \(sideName) · " + language.text("ЗАМЕТКА СЕБЕ", "NOTE TO SELF"))
-                        .font(.system(size: 13, weight: .semibold)).tracking(1.6)
-                        .foregroundStyle(side == .white ? Color.cyan : Color.orange)
-                    let notes = picture.thinkingSelfNotes?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                    Text(notes.isEmpty ? language.text("Игрок ещё не оставил себе заметку.", "This player has not left a note yet.") : notes)
-                        .font(.title2)
-                        .lineLimit(6)
-                        .minimumScaleFactor(0.8)
-                } else {
-                    Text(language.text("Заметка появится, когда игрок начнёт думать.", "The player's note will appear when they start thinking."))
-                        .font(.callout).foregroundStyle(.white.opacity(0.6))
-                }
-            }
-            .multilineTextAlignment(.center)
-            .padding(18)
-            .frame(maxWidth: 980)
-            .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14))
-            .padding(.horizontal, 40).padding(.bottom, 42)
+            if showThinkingNotes { notesPanel }
         }
         .foregroundStyle(.white)
         .shadow(color: .black.opacity(0.8), radius: 8)
         .allowsHitTesting(false)
+    }
+
+    /// The thinking player's note to self; the switch in the control window hides the whole panel.
+    private var notesPanel: some View {
+        VStack(spacing: 10) {
+            if let side = picture.thinkingSide {
+                let name = side == .white ? picture.whiteName : picture.blackName
+                let sideName = language.text(side == .white ? "БЕЛЫЕ" : "ЧЁРНЫЕ", side == .white ? "WHITE" : "BLACK")
+                Text("\(name.uppercased()) · \(sideName) · " + language.text("ЗАМЕТКА СЕБЕ", "NOTE TO SELF"))
+                    .font(.system(size: 13, weight: .semibold)).tracking(1.6)
+                    .foregroundStyle(side == .white ? Color.cyan : Color.orange)
+                let notes = picture.thinkingSelfNotes?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                Text(notes.isEmpty ? language.text("Игрок ещё не оставил себе заметку.", "This player has not left a note yet.") : notes)
+                    .font(.title2)
+                    .lineLimit(6)
+                    .minimumScaleFactor(0.8)
+            } else {
+                Text(language.text("Заметка появится, когда игрок начнёт думать.", "The player's note will appear when they start thinking."))
+                    .font(.callout).foregroundStyle(.white.opacity(0.6))
+            }
+        }
+        .multilineTextAlignment(.center)
+        .padding(18)
+        .frame(maxWidth: 980)
+        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14))
+        .padding(.horizontal, 40).padding(.bottom, 42)
     }
 }

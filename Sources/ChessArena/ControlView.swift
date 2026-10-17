@@ -48,6 +48,8 @@ struct ControlView: View {
                         ForEach(BroadcastLanguage.allCases) { Text($0.name).tag($0) }
                     }
                     .disabled(runtime.matchRunning)
+                    Toggle("Показывать заметку думающего игрока на сцене", isOn: $runtime.showThinkingNotes)
+                        .help("Панель «Заметка себе» внизу доски. После запуска скрыта; на запросы, журнал и архив не влияет")
                     HStack {
                         Text("Общий счёт: \(runtime.score.white) : \(runtime.score.black)")
                         Spacer()

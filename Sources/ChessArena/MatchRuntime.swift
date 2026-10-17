@@ -40,6 +40,8 @@ final class MatchRuntime: ObservableObject {
     }
     @Published var useChatGPTLogin = true { didSet { saveState() } }
     @Published var claudeAccess: ClaudeAccess = .subscription { didSet { saveState() } }
+    /// Stage-only presentation flag: hidden on every launch and never written to the session.
+    @Published var showThinkingNotes = false
     @Published var grokKey = "" { didSet { saveKey(grokKey, account: "grok") } }
     @Published var chatKey = "" { didSet { saveKey(chatKey, account: "chatgpt") } }
     @Published var claudeKey = "" {
