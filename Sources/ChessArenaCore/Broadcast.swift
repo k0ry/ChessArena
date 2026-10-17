@@ -30,6 +30,9 @@ public struct BroadcastPicture: Equatable, Sendable, Codable {
     public var thinkingSide: Side?
     public var pausedPlayer: String?
     public var thinkingSelfNotes: String?
+    /// Who delivered the current taunt; absent in older sessions.
+    public var tauntSide: Side? = nil
+    public var tauntPersona: String? = nil
 
     public init(
         whiteName: String,
@@ -41,7 +44,9 @@ public struct BroadcastPicture: Equatable, Sendable, Codable {
         replies: [ModelReply] = [],
         thinkingSide: Side? = nil,
         pausedPlayer: String? = nil,
-        thinkingSelfNotes: String? = nil
+        thinkingSelfNotes: String? = nil,
+        tauntSide: Side? = nil,
+        tauntPersona: String? = nil
     ) {
         self.whiteName = whiteName
         self.blackName = blackName
@@ -53,6 +58,8 @@ public struct BroadcastPicture: Equatable, Sendable, Codable {
         self.thinkingSide = thinkingSide
         self.pausedPlayer = pausedPlayer
         self.thinkingSelfNotes = thinkingSelfNotes
+        self.tauntSide = tauntSide
+        self.tauntPersona = tauntPersona
     }
 
     public static let empty = BroadcastPicture(

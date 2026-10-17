@@ -29,9 +29,12 @@ public struct Seat: Equatable, Sendable {
     public var model: String
     public var apiKey: String
     public var side: Side
+    /// Comedic manner for taunts; nil for seats that have not been assigned one (tests, legacy callers).
+    public var persona: PlayerPersona?
 
-    public init(name: String, baseURL: URL, model: String, apiKey: String, side: Side, route: ChatRoute = .http) {
+    public init(name: String, baseURL: URL, model: String, apiKey: String, side: Side, route: ChatRoute = .http, persona: PlayerPersona? = nil) {
         self.route = route
+        self.persona = persona
         self.name = name
         self.baseURL = baseURL
         self.model = model
@@ -234,8 +237,10 @@ public enum Prompts {
         fen: String,
         legal: [String],
         history: [String],
-        rejection: String?
+        rejection: String?,
+        persona: PlayerPersona? = nil
     ) -> (system: String, user: String) {
+        let manner = persona.map { $0.instruction + " " } ?? "Taunt persona: deliver the taunt as a dry, sharp remark aimed at your opponent. "
         let system = """
         You are \(side == .white ? "White" : "Black") in a chess broadcast. Play as a professional chess player whose priority is the strongest practical result: win when possible and defend resourcefully when worse.
         Your main goal is to checkmate the opponent's king while protecting your own king.
@@ -244,7 +249,7 @@ public enum Prompts {
         Balance concrete tactics with king safety, material, piece activity, development, central control, pawn structure and endgame prospects. Adapt your plan as the position changes. Before committing, check that your move does not allow an avoidable mate, lose material without sufficient compensation or miss a stronger forcing continuation.
         Choose exactly one move from the supplied Legal UCI list. This list applies to the current position only. If an attempt was rejected, correct it using the current FEN and legal moves.
         You may include self_notes: a concise planning summary for your next turn, such as your strategic goal, intended continuation, threats and conditions for changing the plan. After an accepted move, these notes are saved and sent only to you as a separate message with your next move request; neither your opponent nor the host receives them. Revalidate saved plans against the current FEN and the opponent's actual reply. Each new self_notes replaces your previous notes, so carry forward anything still relevant. Omit self_notes to keep your previous notes, or use an empty string to clear them. Notes from rejected moves are not saved.
-        Keep detailed analysis private; self_notes should contain only a brief actionable summary. The short taunt is for the broadcast and must not replace careful move selection. Reply with JSON only, without markdown or analysis outside the JSON: {"move":"<uci>","taunt":"<one short dry English sentence>","self_notes":"<optional notes for your next turn>"}.
+        Keep detailed analysis private; self_notes should contain only a brief actionable summary. \(manner)The short taunt is for the broadcast and must not replace careful move selection. Reply with JSON only, without markdown or analysis outside the JSON: {"move":"<uci>","taunt":"<one short English sentence aimed at your opponent in your assigned comedic manner>","self_notes":"<optional notes for your next turn>"}.
         """
         var user = "FEN: \(fen)\nLegal UCI: \(legal.joined(separator: " "))\nHistory: \(history.joined(separator: " "))"
         if let rejection {

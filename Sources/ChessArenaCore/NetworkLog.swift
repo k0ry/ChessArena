@@ -8,6 +8,7 @@ public enum NetworkOperation: String, Sendable {
     case token = "ChatGPT · обмен / обновление сессии"
     case discovery = "ChatGPT · параметры авторизации"
     case keys = "ChatGPT · проверка подписи"
+    case speech = "ChatGPT · проверка озвучки"
     case cliVersion = "Gemini CLI · версия"
     case cliModels = "Gemini CLI · каталог моделей"
     case cliCompletion = "Gemini CLI · запрос к модели"
@@ -76,7 +77,7 @@ public final class NetworkLog: ObservableObject {
     private static func endpoint(_ url: URL?) -> String {
         guard let url else { return "(адрес отсутствует)" }
         let hosts = ["api.x.ai", "api.openai.com", "auth.openai.com", "api.anthropic.com"]
-        let paths = ["/v1/chat/completions", "/v1/responses", "/v1/models", "/v1/messages",
+        let paths = ["/v1/chat/completions", "/v1/responses", "/v1/models", "/v1/messages", "/v1/audio/speech",
                      "/api/accounts/oauth/token", "/.well-known/openid-configuration", "/.well-known/jwks.json"]
         let host = hosts.contains(url.host ?? "") ? url.host! : "[сервер скрыт]"
         let path = paths.contains(url.path) ? url.path : "/[путь скрыт]"

@@ -33,6 +33,8 @@ public struct SavedSession: Codable {
     public var hostProvider: NeuralProvider?
     /// Absent in older sessions; Claude then uses the subscription through the local CLI.
     public var claudeAccess: ClaudeAccess?
+    /// Which comedic persona each model plays; absent in older sessions.
+    public var personas: PersonaAssignments?
     public var language: BroadcastLanguage
     public var useChatGPTLogin: Bool
     public var camera: CameraCheckpoint
@@ -41,13 +43,14 @@ public struct SavedSession: Codable {
     public init(game: GameCheckpoint?, series: MatchSeries, white: PlayerConfiguration,
                 black: PlayerConfiguration, hostModel: String, language: BroadcastLanguage,
                 useChatGPTLogin: Bool, camera: CameraCheckpoint, hostProvider: NeuralProvider = .grok,
-                gameMemory: GameMemory? = nil, claudeAccess: ClaudeAccess = .subscription) {
+                gameMemory: GameMemory? = nil, claudeAccess: ClaudeAccess = .subscription, personas: PersonaAssignments? = nil) {
         self.game = game; self.series = series; self.white = white; self.black = black
         self.hostModel = hostModel; self.language = language
         self.useChatGPTLogin = useChatGPTLogin; self.camera = camera
         self.hostProvider = hostProvider
         self.gameMemory = gameMemory
         self.claudeAccess = claudeAccess
+        self.personas = personas
     }
 
     public var hostConfiguration: PlayerConfiguration {

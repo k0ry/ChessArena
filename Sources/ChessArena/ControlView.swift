@@ -50,6 +50,12 @@ struct ControlView: View {
                     .disabled(runtime.matchRunning)
                     Toggle("Показывать заметку думающего игрока на сцене", isOn: $runtime.showThinkingNotes)
                         .help("Панель «Заметка себе» внизу доски. После запуска скрыта; на запросы, журнал и архив не влияет")
+                    Toggle("Показывать колкость игрока на сцене", isOn: $runtime.showTaunts)
+                        .help("Последняя колкость сопернику с именем персоны внизу доски. После запуска скрыта; на запросы, журнал и архив не влияет")
+                    if !SystemVoice.hasMaleVoice(for: runtime.language) {
+                        Text("Для языка эфира не установлен мужской системный голос, ведущий пока звучит доступным голосом с пониженным тоном. Скачайте \(runtime.language == .russian ? "Yuri (русский)" : "Daniel или Reed (английский)") в Системных настройках → Универсальный доступ → Устный контент → Системный голос → Управление голосами.")
+                            .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                    }
                     HStack {
                         Text("Общий счёт: \(runtime.score.white) : \(runtime.score.black)")
                         Spacer()
@@ -189,6 +195,11 @@ private struct ChatGPTPanel: View {
                 if !connection.connected {
                     Text("В браузере разрешите ChessArena использовать ваш план ChatGPT. Доступ зависит от плана и разрешений аккаунта.")
                         .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Button("Проверить озвучку по подписке") { connection.checkSpeech() }
+                        .disabled(connection.busy)
+                    Text(connection.speechStatus).font(.caption).fixedSize(horizontal: false, vertical: true)
+                        .foregroundStyle(connection.speechSupported == true ? .green : .secondary)
                 }
             } else {
                 SecureField("API-ключ OpenAI", text: $runtime.chatKey)

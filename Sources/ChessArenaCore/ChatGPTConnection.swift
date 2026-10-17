@@ -175,6 +175,43 @@ public final class ChatGPTConnection: ObservableObject {
         cancelSignIn()
     }
 
+    /// Whether the subscription token answers the speech endpoint. Undocumented for this sign-in; only a live request tells.
+    @Published public private(set) var speechSupported: Bool?
+    @Published public private(set) var speechStatus = "Озвучка по подписке не проверена."
+
+    public func checkSpeech() {
+        guard !busy else { return }
+        busy = true
+        speechStatus = "Проверяю озвучку по подписке…"
+        Task {
+            defer { busy = false }
+            do {
+                let token = try await accessToken()
+                var request = URLRequest(url: URL(string: "https://api.openai.com/v1/audio/speech")!)
+                request.httpMethod = "POST"
+                request.timeoutInterval = 30
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONSerialization.data(withJSONObject: [
+                    "model": "gpt-4o-mini-tts", "input": "Sound check.", "voice": "onyx", "response_format": "pcm",
+                ])
+                let (data, response) = try await network.loggedData(for: request, operation: .speech)
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                if (200..<300).contains(status), data.count > 2_000 {
+                    speechSupported = true
+                    speechStatus = "Озвучка по подписке отвечает (HTTP \(status), \(data.count) байт звука)."
+                } else {
+                    speechSupported = false
+                    let reason = APIErrorReason.classify(status: status, data: data)
+                    speechStatus = "Озвучка по подписке недоступна: HTTP \(status), \(reason.userMessage) Остаётся системный голос."
+                }
+            } catch {
+                speechSupported = false
+                speechStatus = "Озвучка по подписке не проверена: \(safeMessage(error)) Остаётся системный голос."
+            }
+        }
+    }
+
     public func accessToken() async throws -> String {
         guard let saved = session else { throw ConnectionError.message("Сначала войдите в ChatGPT.") }
         guard saved.scopes.split(separator: " ").contains("chatgpt.tokens.use.direct") else {

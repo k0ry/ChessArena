@@ -6,6 +6,7 @@ struct ProgramTextOverlay: View {
     let picture: BroadcastPicture
     let language: BroadcastLanguage
     var showThinkingNotes = true
+    var showTaunts = false
 
     var body: some View {
         VStack {
@@ -36,13 +37,40 @@ struct ProgramTextOverlay: View {
             if let banner = picture.banner {
                 Text(banner)
                     .font(.system(size: 56, weight: .bold, design: .serif))
-                    .padding(.bottom, showThinkingNotes ? 12 : 42)
+                    .padding(.bottom, showThinkingNotes || showTaunts ? 12 : 42)
             }
+            if showTaunts { tauntPanel }
             if showThinkingNotes { notesPanel }
         }
         .foregroundStyle(.white)
         .shadow(color: .black.opacity(0.8), radius: 8)
         .allowsHitTesting(false)
+    }
+
+    /// The last taunt with its persona; shown only while the taunt switch is on.
+    private var tauntPanel: some View {
+        VStack(spacing: 8) {
+            if let side = picture.tauntSide, !picture.taunt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let name = side == .white ? picture.whiteName : picture.blackName
+                let sideName = language.text(side == .white ? "БЕЛЫЕ" : "ЧЁРНЫЕ", side == .white ? "WHITE" : "BLACK")
+                let persona = picture.tauntPersona.map { " · " + $0.uppercased() } ?? ""
+                Text("\(name.uppercased()) · \(sideName)\(persona) · " + language.text("СОПЕРНИКУ", "TO THE OPPONENT"))
+                    .font(.system(size: 13, weight: .semibold)).tracking(1.6)
+                    .foregroundStyle(side == .white ? Color.cyan : Color.orange)
+                Text(picture.taunt)
+                    .font(.system(size: 26, weight: .medium, design: .serif))
+                    .lineLimit(3)
+                    .minimumScaleFactor(0.8)
+            } else {
+                Text(language.text("Колкость появится после первого хода.", "The first taunt arrives with the first move."))
+                    .font(.callout).foregroundStyle(.white.opacity(0.6))
+            }
+        }
+        .multilineTextAlignment(.center)
+        .padding(16)
+        .frame(maxWidth: 980)
+        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14))
+        .padding(.horizontal, 40).padding(.bottom, showThinkingNotes ? 12 : 42)
     }
 
     /// The thinking player's note to self; the switch in the control window hides the whole panel.

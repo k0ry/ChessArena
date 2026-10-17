@@ -40,8 +40,11 @@ final class MatchRuntime: ObservableObject {
     }
     @Published var useChatGPTLogin = true { didSet { saveState() } }
     @Published var claudeAccess: ClaudeAccess = .subscription { didSet { saveState() } }
-    /// Stage-only presentation flag: hidden on every launch and never written to the session.
+    /// Stage-only presentation flags: hidden on every launch and never written to the session.
     @Published var showThinkingNotes = false
+    @Published var showTaunts = false
+    /// Which comedic persona each model plays; seeded with the initial table when the session has none.
+    private var personas = PersonaAssignments.initial
     @Published var grokKey = "" { didSet { saveKey(grokKey, account: "grok") } }
     @Published var chatKey = "" { didSet { saveKey(chatKey, account: "chatgpt") } }
     @Published var claudeKey = "" {
@@ -115,6 +118,7 @@ final class MatchRuntime: ObservableObject {
                 hostPlayer = saved.hostConfiguration
                 useChatGPTLogin = saved.useChatGPTLogin
                 claudeAccess = saved.claudeAccess ?? .subscription
+                if let saved = saved.personas, !saved.isEmpty { personas = saved }
                 language = saved.language
                 series = saved.series
                 showResultSplash = saved.series.result != nil
@@ -181,7 +185,7 @@ final class MatchRuntime: ObservableObject {
         let saved = SavedSession(game: savedGame, series: series, white: whitePlayer, black: blackPlayer,
                                  hostModel: hostPlayer.model, language: language, useChatGPTLogin: useChatGPTLogin,
                                  camera: scene.cameraCheckpoint, hostProvider: hostPlayer.provider, gameMemory: gameMemory,
-                                 claudeAccess: claudeAccess)
+                                 claudeAccess: claudeAccess, personas: personas)
         do {
             try sessionStore.save(saved)
             if saveFailed { persistenceError = nil; saveFailed = false }
@@ -206,7 +210,7 @@ final class MatchRuntime: ObservableObject {
         guard engine == nil else { return }
         Task {
             voice.language = language
-            _ = await voice.speak(language.toneTest, kind: .tone)
+            _ = await voice.speak(language.toneTest, kind: .tone, profile: .host)
         }
     }
 
@@ -273,8 +277,8 @@ final class MatchRuntime: ObservableObject {
         let folder = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ChessArena", isDirectory: true)
             .appendingPathComponent(ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-") + "-" + round.uuidString + "-" + UUID().uuidString, isDirectory: true)
-        let white = whitePlayer.seat(side: .white, keys: keys)
-        let black = blackPlayer.seat(side: .black, keys: keys)
+        let white = playerSeat(whitePlayer, side: .white)
+        let black = playerSeat(blackPlayer, side: .black)
         let archive = MatchArchive(directory: folder, whiteName: white.name, blackName: black.name)
         let match = MatchEngine(
             scene: scene,
@@ -339,8 +343,8 @@ final class MatchRuntime: ObservableObject {
     func resume() {
         guard let engine, engine.paused else { return }
         guard validatePlayers() else { return }
-        engine.white = whitePlayer.seat(side: .white, keys: keys)
-        engine.black = blackPlayer.seat(side: .black, keys: keys)
+        engine.white = playerSeat(whitePlayer, side: .white)
+        engine.black = playerSeat(blackPlayer, side: .black)
         engine.host = configuredHost
         engine.resume()
         paused = false
@@ -354,6 +358,15 @@ final class MatchRuntime: ObservableObject {
     var needsGemini: Bool { configurations.contains { $0.provider == .gemini } }
     var needsClaude: Bool { configurations.contains { $0.provider == .claude } }
     private var keys: ProviderKeys { ProviderKeys(grok: grokKey, chatGPT: chatKey, anthropic: claudeKey, claudeAccess: claudeAccess) }
+
+    /// A player seat with its persona; first encounters draw a free persona and persist it with the session.
+    private func playerSeat(_ player: PlayerConfiguration, side: Side) -> Seat {
+        var seat = player.seat(side: side, keys: keys)
+        let before = personas
+        seat.persona = personas.assign(provider: player.provider, model: player.model)
+        if personas != before { saveState() }
+        return seat
+    }
 
     func shutdown() {
         saveState()
@@ -447,8 +460,8 @@ final class MatchRuntime: ObservableObject {
         let elapsed = Date().timeIntervalSince(startedAt)
         scene.applyCamera(at: elapsed)
         if engine.paused {
-            engine.white = whitePlayer.seat(side: .white, keys: keys)
-            engine.black = blackPlayer.seat(side: .black, keys: keys)
+            engine.white = playerSeat(whitePlayer, side: .white)
+            engine.black = playerSeat(blackPlayer, side: .black)
             engine.host = configuredHost
         }
         await engine.advance(to: elapsed)

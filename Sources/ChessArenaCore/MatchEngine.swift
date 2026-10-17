@@ -30,6 +30,8 @@ public final class MatchEngine {
     public private(set) var referee = Referee()
     public private(set) var director = ChronicleDirector()
     public private(set) var speech: [SpokenLine] = []
+    /// Player taunts spoken by their persona voices; kept apart from the host's speech log.
+    public private(set) var spokenTaunts: [SpokenLine] = []
     public private(set) var picture: BroadcastPicture
     public private(set) var phase = "idle"
     public private(set) var clock: TimeInterval = 0
@@ -52,6 +54,7 @@ public final class MatchEngine {
     private var blackSelfNotes: String?
     private var animatingUntil: TimeInterval?
     private var started = false
+    private var restored = false
     private var sawFinal = false
     private var replies: [ModelReply] = []
     private var hostCommentaryCount = 0
@@ -84,6 +87,7 @@ public final class MatchEngine {
     /// A pending network call is recreated from the restored position, never replayed as a move.
     public func restore(_ saved: GameCheckpoint) {
         precondition(!started)
+        restored = true
         referee = saved.referee
         clock = saved.elapsed
         picture = saved.picture
@@ -105,7 +109,7 @@ public final class MatchEngine {
     public func toneTest() async -> SpokenLine {
         voice.language = language
         let line = SpokenLine(kind: .tone, text: language.toneTest, boardVersion: boardVersion, clock: clock)
-        _ = await voice.speak(line.text, kind: .tone)
+        _ = await voice.speak(line.text, kind: .tone, profile: .host)
         speech.append(line)
         return line
     }
@@ -126,8 +130,25 @@ public final class MatchEngine {
             refreshPicture(banner: language.result(end, white: white.name, black: black.name))
         } else {
             refreshPicture()
+            if !restored, referee.accepted.isEmpty {
+                await speak(greeting, kind: .intro)
+                guard !stopped else { return }
+            }
             beginThink()
         }
+    }
+
+    /// Spoken once per new game by the host, without a model request so the start never waits on the network.
+    var greeting: String {
+        func lineup(_ seat: Seat, _ side: Side) -> String {
+            let persona = seat.persona.map { language.text(", в образе \($0.displayName(language))", ", in the manner of \($0.displayName(language))") } ?? ""
+            return language.text(
+                "\(side == .white ? "Белыми" : "Чёрными") играет \(seat.name), модель \(seat.model)\(persona).",
+                "Playing \(side == .white ? "White" : "Black"): \(seat.name), model \(seat.model)\(persona).")
+        }
+        return language.text("Добрый вечер, дамы и господа! Добро пожаловать на Chess Arena!", "Good evening, ladies and gentlemen, and welcome to Chess Arena!")
+            + " " + lineup(white, .white) + " " + lineup(black, .black) + " "
+            + language.text("Партия начинается!", "Let the game begin!")
     }
 
     public func advance(to time: TimeInterval) async {
@@ -267,6 +288,8 @@ public final class MatchEngine {
                 phase = "animating"
             }
             picture.taunt = move.taunt
+            picture.tauntSide = side
+            picture.tauntPersona = seat.persona?.displayName(language)
             archive.record(move: move, clock: clock)
             refreshPicture()
             if let end {
@@ -275,6 +298,8 @@ public final class MatchEngine {
                 let commentary = await hostText(Prompts.moveCommentary(fen: referee.position.fen, san: move.san), trackBoard: true)
                 guard !stopped else { return }
                 await speak(commentary, kind: .move)
+                guard !stopped else { return }
+                speakTaunt(move.taunt, by: seat)
                 beginThink()
             }
         case .rejected(let reason, _):
@@ -404,7 +429,7 @@ public final class MatchEngine {
         let samples: [Int16]
         do {
             samples = try await RequestDeadline.run(seconds: 20) { [voice] in
-                await voice.speak(spoken, kind: kind)
+                await voice.speak(spoken, kind: kind, profile: .host)
             }
         } catch {
             voice.stop()
@@ -419,6 +444,32 @@ public final class MatchEngine {
         }
         picture.line = spoken
         refreshPicture()
+    }
+
+    /// The mover's taunt in its persona voice, after the host's comment. The next move request does not wait for it.
+    /// The journal already holds the taunt text from the move record; only the audio joins the archive.
+    private func speakTaunt(_ text: String, by seat: Seat) {
+        let spoken = SpokenText.clean(text)
+        guard !stopped, !spoken.isEmpty, let persona = seat.persona else { return }
+        let taskID = UUID()
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer { self.auxiliaryTasks.removeValue(forKey: taskID) }
+            self.voice.language = self.language
+            let samples: [Int16]
+            do {
+                samples = try await RequestDeadline.run(seconds: 20) { [voice] in
+                    await voice.speak(spoken, kind: .taunt, profile: .persona(persona))
+                }
+            } catch {
+                self.voice.stop()
+                samples = []
+            }
+            guard !self.stopped, !Task.isCancelled else { return }
+            self.spokenTaunts.append(SpokenLine(kind: .taunt, text: spoken, boardVersion: self.boardVersion, clock: self.clock))
+            if self.archive.isOpen { self.archive.appendAudio(samples) }
+        }
+        auxiliaryTasks[taskID] = task
     }
 
     private func hostText(_ prompt: (system: String, user: String), trackBoard: Bool) async -> String {
@@ -476,7 +527,8 @@ public final class MatchEngine {
             fen: referee.position.fen,
             legal: referee.legalUCI,
             history: referee.accepted.map(\.san),
-            rejection: lastRejection
+            rejection: lastRejection,
+            persona: seat.persona
         )
         return ChatCall(url: seat.completionsURL, apiKey: seat.apiKey, model: seat.model,
                         system: language.prompt(prompt.system), user: prompt.user,
@@ -517,7 +569,9 @@ public final class MatchEngine {
             replies: replies,
             thinkingSide: thinkingSide,
             pausedPlayer: paused ? (referee.position.sideToMove == .white ? white.name : black.name) : nil,
-            thinkingSelfNotes: notes.map { ModelLog.sanitize($0, secrets: [white.apiKey, black.apiKey, host.apiKey]) }
+            thinkingSelfNotes: notes.map { ModelLog.sanitize($0, secrets: [white.apiKey, black.apiKey, host.apiKey]) },
+            tauntSide: picture.tauntSide,
+            tauntPersona: picture.tauntPersona
         )
         let saved = checkpoint
         if saved != lastCheckpoint {

@@ -309,6 +309,50 @@ final class MatchTests: XCTestCase {
         try await rig.engine.closeArchive()
     }
 
+    func testNewGameOpensWithGreetingLineupAndPersonaPromptsAndTauntAuthor() async throws {
+        var white = PlayerConfiguration(provider: .claude).seat(side: .white, keys: rigKeys)
+        white.persona = .burr
+        var black = Seat.defaultBlack(apiKey: "k")
+        black.persona = .gervais
+        let rig = try makeRig(whiteSeat: white, blackSeat: black)
+        rig.engine.language = .english
+        try await rig.engine.start(at: 0)
+        let intro = try XCTUnwrap(rig.engine.speech.first)
+        XCTAssertEqual(intro.kind, .intro)
+        XCTAssertTrue(intro.text.contains("welcome to Chess Arena"))
+        XCTAssertTrue(intro.text.contains("Playing White: Claude, model claude-opus-5-5, in the manner of Bill Burr."), intro.text)
+        XCTAssertTrue(intro.text.contains("Playing Black: ChatGPT, model chat-latest, in the manner of Ricky Gervais."), intro.text)
+        XCTAssertTrue(rig.engine.archive.journal.contains { $0.kind == "intro" })
+        try await waitUntil { rig.chat.calls.count == 1 }
+        let request = try XCTUnwrap(rig.chat.calls.first)
+        XCTAssertTrue(request.system.contains("Blunt, irritated, no apologies".lowercased()))
+        XCTAssertTrue(request.system.contains("Address it to your opponent"))
+        XCTAssertTrue(request.system.contains("aimed at your opponent"))
+        XCTAssertFalse(request.system.contains("Bill Burr"))
+        rig.chat.fulfill(where: { $0.system.contains("Reply with JSON") }, body: jsonMove("e2e4", "Nice opening. Shame about everything after it."))
+        try await waitUntil { rig.engine.picture.tauntSide == .white }
+        XCTAssertEqual(rig.engine.picture.taunt, "Nice opening. Shame about everything after it.")
+        XCTAssertEqual(rig.engine.picture.tauntPersona, "Bill Burr")
+        try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
+        rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "Fine.")
+        try await waitUntil { rig.chat.calls.contains { $0.system.contains("You are Black") } }
+        try await waitUntil { rig.engine.spokenTaunts.count == 1 }
+        let voice = try XCTUnwrap(rig.engine.voice as? ScriptedVoice)
+        XCTAssertEqual(voice.spoken.first?.profile, .host, "the greeting is the host's")
+        XCTAssertEqual(voice.spoken.first { $0.kind == .move }?.profile, .host)
+        let taunt = try XCTUnwrap(voice.spoken.first { $0.kind == .taunt })
+        XCTAssertEqual(taunt.profile, .persona(.burr))
+        XCTAssertEqual(taunt.text, "Nice opening. Shame about everything after it.")
+        let order = voice.spoken.map(\.kind)
+        XCTAssertLessThan(order.firstIndex(of: .move)!, order.firstIndex(of: .taunt)!, "host comment first, then the persona taunt")
+        XCTAssertFalse(rig.engine.speech.contains { $0.kind == .taunt }, "taunts stay out of the host speech log")
+        XCTAssertEqual(rig.engine.archive.journal.filter { $0.kind == "taunt" }.count, 1, "the journal keeps one taunt entry per move")
+        XCTAssertTrue(rig.chat.calls.last?.system.contains("polite British cruelty") == true)
+        XCTAssertTrue(rig.chat.calls.last?.system.contains("You are Black") == true)
+        rig.engine.stop()
+        try await rig.engine.closeArchive()
+    }
+
     func testCLIErrorPausesWithoutIllegalMoveOrAutomaticRetry() async throws {
         let rig = try makeRig(whitePlayer: PlayerConfiguration(provider: .gemini))
         try await rig.engine.start(at: 0)
@@ -596,7 +640,7 @@ final class MatchTests: XCTestCase {
         try await rig.engine.closeArchive()
     }
 
-    func testCommentatorStylesRotateAndContinueFromSavedHistory() async throws {
+    func testCommentatorKeepsOneStyleAndFallbacksVaryAfterRestore() async throws {
         let rig = try makeRig()
         try await rig.engine.start(at: 0)
         for (index, move) in ["e2e4", "e7e5", "g1f3", "b8c6"].enumerated() {
@@ -604,8 +648,8 @@ final class MatchTests: XCTestCase {
             rig.chat.fulfill(where: { $0.system.contains("Reply with JSON") }, body: jsonMove(move, ""))
             try await waitUntil { rig.chat.calls.filter { $0.system.contains("already on the board") }.count == index + 1 }
             let host = try XCTUnwrap(rig.chat.calls.last)
-            let expected = ["HOUSE", "CARLIN", "ZADORNOV", "HOUSE"][index]
-            XCTAssertTrue(host.system.contains("Commentary style: " + expected + "."))
+            XCTAssertTrue(host.system.contains("Commentary style: ZADORNOV."))
+            XCTAssertFalse(host.system.contains("House")); XCTAssertFalse(host.system.contains("Carlin"))
             if index > 0 { XCTAssertTrue(host.user.contains("Comment number \(index - 1)")) }
             rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "Comment number \(index)")
             try await waitUntil { rig.engine.speech.filter { $0.kind == .move }.count == index + 1 }
@@ -619,10 +663,12 @@ final class MatchTests: XCTestCase {
         await restored.engine.advance(to: 20)
         try await waitUntil { restored.chat.calls.contains { $0.system.contains("Do not name a move") } }
         let waiting = try XCTUnwrap(restored.chat.calls.first { $0.system.contains("Do not name a move") })
-        XCTAssertTrue(waiting.system.contains("Commentary style: CARLIN."))
+        XCTAssertTrue(waiting.system.contains("Commentary style: ZADORNOV."))
         restored.chat.fail(where: { $0.system.contains("Do not name a move") }, error: .transport)
         try await waitUntil { restored.engine.speech.contains { $0.kind == .wait } }
-        XCTAssertEqual(restored.engine.speech.last?.text, "Call indecision strategy and suddenly it looks expensive.")
+        let waitingLines = ["He set out to make a move and formed a one-pawn board of directors.", "Such a small board, such a large place to get lost in your plans.", "He wanted a quick decision. Now he is choosing the quickest way to choose."]
+        XCTAssertTrue(waitingLines.contains(restored.engine.speech.last?.text ?? ""), restored.engine.speech.last?.text ?? "")
+        XCTAssertFalse(restored.engine.speech.contains { $0.kind == .intro }, "a restored game is not greeted again")
         restored.engine.stop()
         try await restored.engine.closeArchive()
     }
@@ -637,7 +683,7 @@ final class MatchTests: XCTestCase {
             XCTAssertTrue(rig.chat.calls[0].system.contains(language == .russian ? "Russian" : "English"))
             rig.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove("e2e4", ""))
             try await waitUntil { rig.engine.moveRequestCount == 2 }
-            XCTAssertEqual(rig.engine.speech.last?.text, language == .russian ? "Ход сделан. План выглядит уверенно — симптомы пока собираем." : "A move, confidently delivered. We are still collecting symptoms.")
+            XCTAssertEqual(rig.engine.speech.last?.text, language == .russian ? "Фигура переехала на одну клетку, а планов — как после покупки новой квартиры." : "One piece changed squares, with enough plans to furnish a new apartment.")
             XCTAssertEqual(rig.engine.voice.language, language)
             rig.engine.stop()
             try await rig.engine.closeArchive()
@@ -787,7 +833,7 @@ final class MatchTests: XCTestCase {
 
     private func makeRig(
         whitePlayer: PlayerConfiguration? = nil, blackPlayer: PlayerConfiguration? = nil,
-        hostPlayer: PlayerConfiguration? = nil, gameMemory: GameMemory = GameMemory(), whiteSeat: Seat? = nil
+        hostPlayer: PlayerConfiguration? = nil, gameMemory: GameMemory = GameMemory(), whiteSeat: Seat? = nil, blackSeat: Seat? = nil
     ) throws -> Rig {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let archive = MatchArchive(directory: directory,
@@ -797,7 +843,7 @@ final class MatchTests: XCTestCase {
         let secret = "CHESSARENA-SECRET-KEY-9f3c2a7b"
         let keys = rigKeys
         let white = whiteSeat ?? whitePlayer?.seat(side: .white, keys: keys) ?? Seat.defaultWhite(apiKey: secret)
-        let black = blackPlayer?.seat(side: .black, keys: keys) ?? Seat.defaultBlack(apiKey: secret)
+        let black = blackSeat ?? blackPlayer?.seat(side: .black, keys: keys) ?? Seat.defaultBlack(apiKey: secret)
         let host = hostPlayer?.seat(side: .white, keys: keys)
             ?? Seat(name: "Host", baseURL: ModelCatalog.grokAPI, model: ModelCatalog.grokModel, apiKey: secret, side: .white)
         let engine = MatchEngine(

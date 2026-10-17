@@ -12,7 +12,8 @@ struct ProgramView: View {
         HStack(spacing: 0) {
             ZStack {
                 BoardContainer(scene: runtime.scene)
-                ProgramTextOverlay(picture: runtime.picture, language: runtime.language, showThinkingNotes: runtime.showThinkingNotes)
+                ProgramTextOverlay(picture: runtime.picture, language: runtime.language,
+                                   showThinkingNotes: runtime.showThinkingNotes, showTaunts: runtime.showTaunts)
                 CameraOrbitControl(scene: runtime.scene, language: runtime.language)
                     .padding(.trailing, 18)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
