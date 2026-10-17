@@ -33,6 +33,8 @@ public struct BroadcastPicture: Equatable, Sendable, Codable {
     /// Who delivered the current taunt; absent in older sessions.
     public var tauntSide: Side? = nil
     public var tauntPersona: String? = nil
+    /// Whole seconds left before the pending move request times out; nil when nobody is thinking.
+    public var thinkSecondsLeft: Int? = nil
 
     public init(
         whiteName: String,
@@ -46,7 +48,8 @@ public struct BroadcastPicture: Equatable, Sendable, Codable {
         pausedPlayer: String? = nil,
         thinkingSelfNotes: String? = nil,
         tauntSide: Side? = nil,
-        tauntPersona: String? = nil
+        tauntPersona: String? = nil,
+        thinkSecondsLeft: Int? = nil
     ) {
         self.whiteName = whiteName
         self.blackName = blackName
@@ -60,6 +63,7 @@ public struct BroadcastPicture: Equatable, Sendable, Codable {
         self.thinkingSelfNotes = thinkingSelfNotes
         self.tauntSide = tauntSide
         self.tauntPersona = tauntPersona
+        self.thinkSecondsLeft = thinkSecondsLeft
     }
 
     public static let empty = BroadcastPicture(

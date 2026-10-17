@@ -9,6 +9,37 @@ struct ProgramTextOverlay: View {
     var showTaunts = false
 
     var body: some View {
+        ZStack {
+            countdown
+            content
+        }
+        .foregroundStyle(.white)
+        .shadow(color: .black.opacity(0.8), radius: 8)
+        .allowsHitTesting(false)
+    }
+
+    /// Seconds left on the move request, large, on the moving side, in that side's color.
+    @ViewBuilder
+    private var countdown: some View {
+        if let side = picture.thinkingSide, let left = picture.thinkSecondsLeft {
+            let color = side == .white ? Color.cyan : Color.orange
+            HStack {
+                if side == .black { Spacer() }
+                VStack(spacing: 2) {
+                    Text(String(format: "%02d:%02d", left / 60, left % 60))
+                        .font(.system(size: 112, weight: .black, design: .rounded)).monospacedDigit()
+                        .foregroundStyle(color.opacity(left <= 60 ? 0.95 : 0.8))
+                    Text(language.text("НА ХОД", "TO MOVE"))
+                        .font(.system(size: 14, weight: .semibold)).tracking(3)
+                        .foregroundStyle(color.opacity(0.7))
+                }
+                if side == .white { Spacer() }
+            }
+            .padding(.horizontal, 48)
+        }
+    }
+
+    private var content: some View {
         VStack {
             HStack(spacing: 12) {
                 Text("CHESS / ARENA")
@@ -42,9 +73,6 @@ struct ProgramTextOverlay: View {
             if showTaunts { tauntPanel }
             if showThinkingNotes { notesPanel }
         }
-        .foregroundStyle(.white)
-        .shadow(color: .black.opacity(0.8), radius: 8)
-        .allowsHitTesting(false)
     }
 
     /// The last taunt with its persona; shown only while the taunt switch is on.

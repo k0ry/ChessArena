@@ -48,6 +48,7 @@ public final class MatchEngine {
     private var thinkGeneration = 0
     private var waitEpoch = 0
     private var thinkStarted: TimeInterval = 0
+    private var thinkDeadline: TimeInterval = 0
     private var waitSpoken = false
     private var lastRejection: String?
     private var whiteSelfNotes: String?
@@ -226,6 +227,7 @@ public final class MatchEngine {
         thinkGeneration += 1
         let generation = thinkGeneration
         thinkStarted = clock
+        thinkDeadline = clock + requestTimeout
         waitSpoken = false
         phase = "thinking"
         scene.setThinking(referee.position.sideToMove)
@@ -557,6 +559,8 @@ public final class MatchEngine {
 
     private func refreshPicture(line: String? = nil, banner: String? = nil) {
         let thinkingSide = phase == "thinking" && thinkTask != nil ? referee.position.sideToMove : nil
+        // Whole seconds so the checkpoint changes once a second, not once a frame.
+        let secondsLeft = thinkingSide == nil ? nil : max(0, Int((thinkDeadline - clock).rounded(.up)))
         // Broadcast only this game's turn note; cross-game advice stays in the model request.
         let notes = thinkingSide == nil ? nil : lastPlayerRequest?.call.selfNotes
         picture = BroadcastPicture(
@@ -571,7 +575,8 @@ public final class MatchEngine {
             pausedPlayer: paused ? (referee.position.sideToMove == .white ? white.name : black.name) : nil,
             thinkingSelfNotes: notes.map { ModelLog.sanitize($0, secrets: [white.apiKey, black.apiKey, host.apiKey]) },
             tauntSide: picture.tauntSide,
-            tauntPersona: picture.tauntPersona
+            tauntPersona: picture.tauntPersona,
+            thinkSecondsLeft: secondsLeft
         )
         let saved = checkpoint
         if saved != lastCheckpoint {

@@ -353,6 +353,38 @@ final class MatchTests: XCTestCase {
         try await rig.engine.closeArchive()
     }
 
+    func testThinkCountdownFollowsTheMoveRequestAndResetsOnRepeat() async throws {
+        let rig = try makeRig()
+        try await rig.engine.start(at: 0)
+        try await waitUntil { rig.chat.calls.count == 1 }
+        XCTAssertEqual(rig.engine.picture.thinkingSide, .white)
+        XCTAssertEqual(rig.engine.picture.thinkSecondsLeft, Int(RequestTimeouts.player))
+        await rig.engine.advance(to: 12.4)
+        XCTAssertEqual(rig.engine.picture.thinkSecondsLeft, Int(RequestTimeouts.player) - 12, "rounded up to whole seconds")
+        rig.engine.repeatPlayerRequest()
+        XCTAssertEqual(rig.engine.picture.thinkSecondsLeft, Int(RequestTimeouts.player), "a repeated request restarts the countdown")
+        try await waitUntil { rig.chat.calls.count == 2 }
+        // The cancelled first attempt is still pending in the script; fail it first, then the live repeat.
+        rig.chat.fail(where: { $0.system.contains("You are White") }, error: .http(status: 500, reason: .server))
+        rig.chat.fail(where: { $0.system.contains("You are White") }, error: .http(status: 500, reason: .server))
+        try await waitUntil { rig.engine.paused }
+        XCTAssertNil(rig.engine.picture.thinkSecondsLeft, "no countdown while paused")
+        XCTAssertNil(rig.engine.picture.thinkingSide)
+        await rig.engine.advance(to: 20)
+        try await waitUntil { rig.chat.calls.count == 3 }
+        XCTAssertEqual(rig.engine.picture.thinkSecondsLeft, Int(RequestTimeouts.player))
+        rig.chat.fulfill(where: { $0.system.contains("You are White") }, body: jsonMove("e2e4", ""))
+        try await waitUntil { rig.engine.referee.accepted.count == 1 }
+        try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
+        XCTAssertNil(rig.engine.picture.thinkSecondsLeft, "the countdown disappears with the accepted move")
+        let data = try JSONEncoder().encode(rig.engine.picture)
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        legacy.removeValue(forKey: "thinkSecondsLeft")
+        XCTAssertNil(try JSONDecoder().decode(BroadcastPicture.self, from: JSONSerialization.data(withJSONObject: legacy)).thinkSecondsLeft)
+        rig.engine.stop()
+        try await rig.engine.closeArchive()
+    }
+
     func testCLIErrorPausesWithoutIllegalMoveOrAutomaticRetry() async throws {
         let rig = try makeRig(whitePlayer: PlayerConfiguration(provider: .gemini))
         try await rig.engine.start(at: 0)
