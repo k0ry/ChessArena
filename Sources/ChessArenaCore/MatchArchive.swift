@@ -49,16 +49,16 @@ public final class MatchArchive {
         isOpen = true
     }
 
-    public func record(move: AcceptedMove, clock: TimeInterval) {
+    public func record(move: AcceptedMove, clock: TimeInterval, includeTaunt: Bool = true) {
         moves.append(move)
-        if !move.taunt.isEmpty {
+        if includeTaunt, !move.taunt.isEmpty {
             journal.append(JournalEntry(kind: "taunt", text: move.taunt, clock: clock, move: move.move.uci))
         }
     }
 
-    public func record(line: SpokenLine) {
+    public func record(line: SpokenLine, move: String? = nil) {
         guard line.kind != .tone else { return }
-        journal.append(JournalEntry(kind: line.kind.rawValue, text: line.text, clock: line.clock, move: nil))
+        journal.append(JournalEntry(kind: line.kind.rawValue, text: line.text, clock: line.clock, move: move))
     }
 
     public func markResult(_ end: GameEnd?) {
@@ -76,12 +76,16 @@ public final class MatchArchive {
         }
     }
 
-    public func append(pixelBuffer: CVPixelBuffer) {
-        writer?.append(pixelBuffer: pixelBuffer)
+    public func append(pixelBuffer: CVPixelBuffer, at time: TimeInterval? = nil) {
+        writer?.append(pixelBuffer: pixelBuffer, at: time)
     }
 
-    public func appendAudio(_ samples: [Int16]) {
-        try? writer?.appendPCM(samples)
+    public func appendAudio(_ samples: [Int16], sampleRate: Double = 44_100, at time: TimeInterval? = nil) {
+        try? writer?.appendPCM(AudioSamples.resample(samples, from: sampleRate), at: time)
+    }
+
+    public func appendSilence(until time: TimeInterval) {
+        try? writer?.appendSilence(until: time)
     }
 
     public func close() async throws {
@@ -139,6 +143,10 @@ final class ArenaVideoWriter {
     private let audioInput: AVAssetWriterInput
     private var videoTime = CMTime.zero
     private var audioTime = CMTime.zero
+    private var pendingAudio: [CMSampleBuffer] = []
+    private var pendingVideo: [(CVPixelBuffer, CMTime)] = []
+    private var audioFailure = false
+    private var videoFailure = false
     private var started = false
 
     init(url: URL) throws {
@@ -182,15 +190,27 @@ final class ArenaVideoWriter {
         started = true
     }
 
-    func append(pixelBuffer: CVPixelBuffer) {
-        guard started, videoInput.isReadyForMoreMediaData else { return }
-        if adaptor.append(pixelBuffer, withPresentationTime: videoTime) {
-            videoTime = CMTimeAdd(videoTime, CMTime(value: 1, timescale: 30))
-        }
+    func append(pixelBuffer: CVPixelBuffer, at time: TimeInterval? = nil) {
+        flushAudio()
+        guard started else { return }
+        let timestamp = time.map { CMTime(seconds: max(0, $0), preferredTimescale: 600) } ?? videoTime
+        guard CMTimeCompare(timestamp, videoTime) >= 0 else { return }
+        pendingVideo.append((pixelBuffer, timestamp))
+        // AAC interleaving can hold the video input for about a second. Retain those frames;
+        // bound memory if an encoder remains stalled much longer than that.
+        if pendingVideo.count > 60 { pendingVideo.removeFirst() }
+        videoTime = CMTimeAdd(timestamp, CMTime(value: 1, timescale: time == nil ? 30 : 600))
+        flushVideo()
     }
 
-    func appendPCM(_ samples: [Int16]) throws {
-        guard started, !samples.isEmpty, audioInput.isReadyForMoreMediaData else { return }
+    func appendPCM(_ samples: [Int16], at time: TimeInterval? = nil) throws {
+        guard started, !samples.isEmpty else { return }
+        // Preserve thinking/synthesis gaps instead of concatenating voices from time zero.
+        let requested = time.map { CMTime(seconds: max(0, $0), preferredTimescale: 44_100) } ?? audioTime
+        // AAC encoding consumes continuous PCM. Explicit silence preserves gaps reliably;
+        // sparse input timestamps alone can be collapsed by the encoder.
+        try appendSilence(until: requested.seconds)
+        let timestamp = CMTimeMaximum(audioTime, requested)
         var asbd = AudioStreamBasicDescription(
             mSampleRate: 44_100,
             mFormatID: kAudioFormatLinearPCM,
@@ -246,7 +266,7 @@ final class ArenaVideoWriter {
         }
         var timing = CMSampleTimingInfo(
             duration: CMTime(value: 1, timescale: 44_100),
-            presentationTimeStamp: audioTime,
+            presentationTimeStamp: timestamp,
             decodeTimeStamp: .invalid
         )
         var sampleBuffer: CMSampleBuffer?
@@ -267,20 +287,53 @@ final class ArenaVideoWriter {
         guard sampleStatus == noErr, let sampleBuffer else {
             throw ArchiveError.writer("sample \(sampleStatus)")
         }
-        if audioInput.append(sampleBuffer) {
-            audioTime = CMTimeAdd(audioTime, CMTime(value: CMTimeValue(samples.count), timescale: 44_100))
+        pendingAudio.append(sampleBuffer)
+        audioTime = CMTimeAdd(timestamp, CMTime(value: CMTimeValue(samples.count), timescale: 44_100))
+        flushAudio()
+    }
+
+    func appendSilence(until time: TimeInterval) throws {
+        guard started else { return }
+        var silence = max(0, Int(((time - audioTime.seconds) * 44_100).rounded()))
+        while silence > 0 {
+            let count = min(silence, 44_100)
+            try appendPCM(Array(repeating: 0, count: count))
+            silence -= count
+        }
+    }
+
+    private func flushAudio() {
+        while !pendingAudio.isEmpty, audioInput.isReadyForMoreMediaData {
+            let buffer = pendingAudio.removeFirst()
+            if !audioInput.append(buffer) { audioFailure = true; break }
+        }
+    }
+
+    private func flushVideo() {
+        while !pendingVideo.isEmpty, videoInput.isReadyForMoreMediaData {
+            let (buffer, timestamp) = pendingVideo.removeFirst()
+            if !adaptor.append(buffer, withPresentationTime: timestamp) { videoFailure = true; break }
         }
     }
 
     func finish() async throws {
-        videoInput.markAsFinished()
-        audioInput.markAsFinished()
+        var audioFinished = false, videoFinished = false
+        while writer.status == .writing, !audioFailure, !videoFailure {
+            flushAudio()
+            flushVideo()
+            if pendingAudio.isEmpty, !audioFinished { audioInput.markAsFinished(); audioFinished = true }
+            if pendingVideo.isEmpty, !videoFinished { videoInput.markAsFinished(); videoFinished = true }
+            if audioFinished && videoFinished { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        if !audioFinished { audioInput.markAsFinished() }
+        if !videoFinished { videoInput.markAsFinished() }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             writer.finishWriting {
                 continuation.resume()
             }
         }
-        guard writer.status == .completed else {
+        guard writer.status == .completed, !audioFailure, !videoFailure else {
             throw ArchiveError.writer(writer.error?.localizedDescription ?? "status \(writer.status.rawValue)")
         }
     }

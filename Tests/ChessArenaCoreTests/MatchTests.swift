@@ -4,6 +4,154 @@ import XCTest
 
 @MainActor
 final class MatchTests: XCTestCase {
+    func testCommentaryKeepsTheCompleteLastSentenceBeyondPromptWordLimit() async throws {
+        let rig = try makeRig()
+        try await rig.engine.start(at: 0)
+        try await waitUntil { rig.chat.calls.count == 1 }
+        rig.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove("e2e4", ""))
+        try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
+        let text = Array(repeating: "word", count: 36).joined(separator: " ") + " completes this sentence. And the final sentence remains intact."
+        rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: text)
+        try await waitUntil { rig.engine.speech.contains { $0.kind == .move } }
+        XCTAssertEqual(rig.engine.speech.last?.text, text)
+        let voice = try XCTUnwrap(rig.engine.voice as? ScriptedVoice)
+        XCTAssertEqual(voice.prepared.last?.text, text)
+        rig.engine.stop(); try await rig.engine.closeArchive()
+    }
+
+    func testSlowSynthesisKeepsBoardAndThinkingUntilPlaybackStarts() async throws {
+        let rig = try makeRig()
+        try await rig.engine.start(at: 0)
+        let voice = try XCTUnwrap(rig.engine.voice as? ScriptedVoice)
+        voice.holdPreparation = true
+        try await waitUntil { rig.chat.calls.count == 1 }
+        rig.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove("e2e4", ""))
+        try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
+        rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "Ready commentary.")
+        try await waitUntil { voice.prepared.contains { $0.kind == .move } }
+        await rig.engine.advance(to: 11)
+        XCTAssertEqual(rig.engine.boardVersion, 0)
+        XCTAssertEqual(rig.engine.checkpoint.referee.position, Position.standard())
+        XCTAssertNil(rig.engine.scene.node(named: "piece-pawn-e4"))
+        XCTAssertEqual(rig.engine.picture.thinkingSide, .white)
+        var beganTogether = false
+        voice.onSpeaking = {
+            if voice.spoken.last?.kind == .move {
+                beganTogether = rig.engine.boardVersion == 1 && rig.engine.scene.node(named: "piece-pawn-e4") != nil
+            }
+        }
+        voice.holdPreparation = false; voice.releasePreparation()
+        try await waitUntil { rig.engine.speech.contains { $0.kind == .move } }
+        XCTAssertTrue(beganTogether)
+        XCTAssertEqual(rig.engine.speech.last?.clock, 11)
+        rig.engine.stop(); try await rig.engine.closeArchive()
+    }
+
+    func testNextAnswerAndSynthesisOverlapPlayerLineButWaitForHostToFinish() async throws {
+        var white = Seat.defaultWhite(apiKey: "k"); white.persona = .burr
+        var black = Seat.defaultBlack(apiKey: "k"); black.persona = .gervais
+        let rig = try makeRig(whiteSeat: white, blackSeat: black)
+        try await rig.engine.start(at: 0)
+        let voice = try XCTUnwrap(rig.engine.voice as? ScriptedVoice)
+        voice.hold = true
+        try await waitUntil { rig.chat.calls.count == 1 }
+        rig.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove("e2e4", "First taunt."))
+        try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
+        rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "First commentary.")
+        try await waitUntil { rig.chat.calls.contains { $0.system.contains("You are Black") } }
+        XCTAssertTrue(voice.isSpeaking)
+        XCTAssertEqual(voice.spoken.last?.text, "First taunt.")
+        rig.chat.fulfill(where: { $0.system.contains("You are Black") }, body: jsonMove("e7e5", "Second taunt."))
+        try await waitUntil { rig.chat.calls.filter { $0.system.contains("already on the board") }.count == 2 }
+        rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "Second commentary.")
+        try await waitUntil { voice.prepared.contains { $0.text == "Second taunt." } }
+        XCTAssertEqual(rig.engine.boardVersion, 1)
+        XCTAssertNil(rig.engine.scene.node(named: "piece-pawn-e5"))
+        XCTAssertEqual(voice.spoken.last?.text, "First taunt.")
+        voice.release()
+        try await waitUntil { voice.spoken.last?.text == "First commentary." }
+        XCTAssertEqual(rig.engine.boardVersion, 1)
+        voice.release()
+        try await waitUntil { voice.spoken.last?.text == "Second taunt." }
+        XCTAssertEqual(rig.engine.boardVersion, 2)
+        XCTAssertNotNil(rig.engine.scene.node(named: "piece-pawn-e5"))
+        XCTAssertEqual(rig.engine.spokenTaunts.first?.boardVersion, 1)
+        rig.engine.stop(); try await rig.engine.closeArchive()
+    }
+
+    func testRepeatDiscardsPreparedMoveWithoutInterruptingCurrentCommentary() async throws {
+        let rig = try makeRig()
+        try await rig.engine.start(at: 0)
+        let voice = try XCTUnwrap(rig.engine.voice as? ScriptedVoice)
+        voice.hold = true
+        try await waitUntil { rig.chat.calls.count == 1 }
+        rig.chat.fulfill(where: { $0.system.contains("You are White") }, body: jsonMove("e2e4", ""))
+        try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
+        rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "Still speaking.")
+        try await waitUntil { rig.chat.calls.contains { $0.system.contains("You are Black") } }
+        rig.chat.fulfill(where: { $0.system.contains("You are Black") }, body: jsonMove("e7e5", ""))
+        try await waitUntil { rig.chat.calls.filter { $0.system.contains("already on the board") }.count == 2 }
+        rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "Discard this prepared move.")
+        try await waitUntil { voice.prepared.contains { $0.text == "Discard this prepared move." } }
+        XCTAssertTrue(rig.engine.canRepeatPlayerRequest)
+        rig.engine.repeatPlayerRequest()
+        try await waitUntil { rig.chat.calls.filter { $0.system.contains("You are Black") }.count == 2 }
+        XCTAssertTrue(voice.isSpeaking)
+        XCTAssertEqual(voice.spoken.last?.text, "Still speaking.")
+        rig.chat.fulfill(where: { $0.system.contains("You are Black") }, body: jsonMove("d7d5", ""))
+        try await waitUntil { rig.chat.calls.filter { $0.system.contains("already on the board") }.count == 3 }
+        rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "Replacement move.")
+        try await waitUntil { voice.prepared.contains { $0.text == "Replacement move." } }
+        XCTAssertEqual(rig.engine.boardVersion, 1)
+        voice.hold = false; voice.release()
+        try await waitUntil { rig.engine.boardVersion == 2 }
+        XCTAssertEqual(rig.engine.referee.accepted.last?.move.uci, "d7d5")
+        XCTAssertFalse(voice.spoken.contains { $0.text == "Discard this prepared move." })
+        XCTAssertNil(rig.engine.scene.node(named: "piece-pawn-e5"))
+        rig.engine.stop(); try await rig.engine.closeArchive()
+    }
+
+    func testWaitingCommentaryLongerThanTwentySecondsFinishesBeforeReadyMove() async throws {
+        let rig = try makeRig()
+        try await rig.engine.start(at: 0)
+        let voice = try XCTUnwrap(rig.engine.voice as? ScriptedVoice)
+        voice.hold = true
+        await rig.engine.advance(to: 20)
+        try await waitUntil { rig.chat.calls.contains { $0.system.contains("Do not name a move") } }
+        rig.chat.fulfill(where: { $0.system.contains("Do not name a move") }, body: "A long waiting commentary.")
+        try await waitUntil { voice.isSpeaking }
+        rig.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove("e2e4", ""))
+        try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
+        rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "Prepared move.")
+        try await waitUntil { voice.prepared.contains { $0.kind == .move } }
+        try await Task.sleep(nanoseconds: 20_300_000_000)
+        XCTAssertTrue(voice.isSpeaking, "A playback must outlive the old twenty-second cutoff")
+        XCTAssertEqual(voice.spoken.last?.kind, .wait)
+        XCTAssertEqual(rig.engine.boardVersion, 0)
+        voice.hold = false; voice.release()
+        try await waitUntil { rig.engine.boardVersion == 1 }
+        XCTAssertEqual(voice.spoken.map(\.kind), [.intro, .wait, .move])
+        rig.engine.stop(); try await rig.engine.closeArchive()
+    }
+
+    func testStopDuringAudioPreparationNeverCommitsCandidateMove() async throws {
+        let rig = try makeRig()
+        try await rig.engine.start(at: 0)
+        let voice = try XCTUnwrap(rig.engine.voice as? ScriptedVoice)
+        voice.holdPreparation = true
+        try await waitUntil { rig.chat.calls.count == 1 }
+        rig.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove("e2e4", ""))
+        try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
+        rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "Late audio.")
+        try await waitUntil { voice.prepared.contains { $0.kind == .move } }
+        rig.engine.stop()
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(rig.engine.boardVersion, 0)
+        XCTAssertEqual(rig.engine.checkpoint.referee.position, Position.standard())
+        XCTAssertFalse(voice.spoken.contains { $0.kind == .move })
+        try await rig.engine.closeArchive()
+    }
+
     func testEscapedCommentaryIsCleanedForScreenSpeechAndJournal() async throws {
         let rig = try makeRig()
         try await rig.engine.start(at: 0)
@@ -37,6 +185,8 @@ final class MatchTests: XCTestCase {
         XCTAssertEqual(rig.engine.picture.thinkingSelfNotes, "BLACK_TURN_NOTE")
         XCTAssertFalse(rig.engine.picture.broadcastText.contains("OLD_BLACK_LESSON"))
         rig.chat.fulfill(where: { $0.system.contains("Reply with JSON") }, body: jsonMove("d8h4", ""))
+        try await waitUntil { rig.chat.calls.contains { $0.user.contains("Result:") } }
+        rig.chat.fulfill(where: { $0.user.contains("Result:") }, body: "Black wins.")
         try await waitUntil { rig.chat.calls.filter { $0.system.contains("Post-game self-review") }.count == 2 }
         let reviews = rig.chat.calls.filter { $0.system.contains("Post-game self-review") }
         for call in reviews {
@@ -92,6 +242,8 @@ final class MatchTests: XCTestCase {
         try await rig.engine.start(at: 0)
         try await waitUntil { rig.chat.calls.count == 1 }
         rig.chat.fulfill(where: { $0.system.contains("Reply with JSON") }, body: jsonMove("d8h4", ""))
+        try await waitUntil { rig.chat.calls.contains { $0.user.contains("Result:") } }
+        rig.chat.fulfill(where: { $0.user.contains("Result:") }, body: "Black wins.")
         try await waitUntil { rig.chat.calls.filter { $0.system.contains("Post-game self-review") }.count == 2 }
         rig.chat.fail(where: { $0.user.contains("You played: White") })
         rig.chat.fulfill(where: { $0.user.contains("Result:") }, body: "Black wins.")
@@ -113,6 +265,8 @@ final class MatchTests: XCTestCase {
         try await rig.engine.start(at: 0)
         try await waitUntil { rig.chat.calls.count == 1 }
         rig.chat.fulfill(where: { $0.system.contains("Reply with JSON") }, body: jsonMove("d8h4", ""))
+        try await waitUntil { rig.chat.calls.contains { $0.user.contains("Result:") } }
+        rig.chat.fulfill(where: { $0.user.contains("Result:") }, body: "Black wins.")
         try await waitUntil { rig.chat.calls.filter { $0.system.contains("Post-game self-review") }.count == 2 }
         rig.engine.stop()
         rig.chat.fulfill(where: { $0.user.contains("You played: White") }, body: "LATE_WHITE")
@@ -169,8 +323,8 @@ final class MatchTests: XCTestCase {
             rig.chat.fulfill(where: { $0.system.contains("Reply with JSON") }, body: String(decoding: body, as: UTF8.self))
             try await waitUntil { rig.chat.calls.filter { $0.system.contains("already on the board") }.count == index + 1 }
             XCTAssertNil(rig.chat.calls.last?.selfNotes)
-            XCTAssertNil(rig.engine.picture.thinkingSide)
-            XCTAssertNil(rig.engine.picture.thinkingSelfNotes)
+            XCTAssertEqual(rig.engine.picture.thinkingSide, index.isMultiple(of: 2) ? .white : .black)
+            XCTAssertEqual(rig.engine.picture.thinkingSelfNotes, call.selfNotes)
             XCTAssertFalse(rig.chat.calls.last!.user.contains("PRIVATE_PLAN"))
             rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "Played.")
         }
@@ -195,6 +349,8 @@ final class MatchTests: XCTestCase {
         XCTAssertEqual(restored.engine.picture.thinkingSelfNotes, "WHITE_UPDATED_PLAN")
 
         restored.chat.fulfill(where: { $0.system.contains("Reply with JSON") }, body: jsonMove("f1c4", "Go."))
+        try await waitUntil { restored.chat.calls.contains { $0.system.contains("already on the board") } }
+        restored.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "Played.")
         try await waitUntil { restored.engine.boardVersion == 5 }
         XCTAssertEqual(restored.engine.checkpoint.whiteSelfNotes, "WHITE_UPDATED_PLAN")
         restored.engine.stop()
@@ -330,13 +486,13 @@ final class MatchTests: XCTestCase {
         XCTAssertTrue(request.system.contains("aimed at your opponent"))
         XCTAssertFalse(request.system.contains("Bill Burr"))
         rig.chat.fulfill(where: { $0.system.contains("Reply with JSON") }, body: jsonMove("e2e4", "Nice opening. Shame about everything after it."))
-        try await waitUntil { rig.engine.picture.tauntSide == .white }
-        XCTAssertEqual(rig.engine.picture.taunt, "Nice opening. Shame about everything after it.")
-        XCTAssertEqual(rig.engine.picture.tauntPersona, "Bill Burr")
         try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
         rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "Fine.")
         try await waitUntil { rig.chat.calls.contains { $0.system.contains("You are Black") } }
         try await waitUntil { rig.engine.spokenTaunts.count == 1 }
+        XCTAssertEqual(rig.engine.picture.tauntSide, .white)
+        XCTAssertEqual(rig.engine.picture.taunt, "Nice opening. Shame about everything after it.")
+        XCTAssertEqual(rig.engine.picture.tauntPersona, "Bill Burr")
         let voice = try XCTUnwrap(rig.engine.voice as? ScriptedVoice)
         XCTAssertEqual(voice.spoken.first?.profile, .host, "the greeting is the host's")
         XCTAssertEqual(voice.spoken.first { $0.kind == .move }?.profile, .host)
@@ -344,7 +500,7 @@ final class MatchTests: XCTestCase {
         XCTAssertEqual(taunt.profile, .persona(.burr))
         XCTAssertEqual(taunt.text, "Nice opening. Shame about everything after it.")
         let order = voice.spoken.map(\.kind)
-        XCTAssertLessThan(order.firstIndex(of: .move)!, order.firstIndex(of: .taunt)!, "host comment first, then the persona taunt")
+        XCTAssertLessThan(order.firstIndex(of: .taunt)!, order.firstIndex(of: .move)!, "player line with the move, then the host comment")
         XCTAssertFalse(rig.engine.speech.contains { $0.kind == .taunt }, "taunts stay out of the host speech log")
         XCTAssertEqual(rig.engine.archive.journal.filter { $0.kind == "taunt" }.count, 1, "the journal keeps one taunt entry per move")
         XCTAssertTrue(rig.chat.calls.last?.system.contains("polite British cruelty") == true)
@@ -374,9 +530,9 @@ final class MatchTests: XCTestCase {
         try await waitUntil { rig.chat.calls.count == 3 }
         XCTAssertEqual(rig.engine.picture.thinkSecondsLeft, Int(RequestTimeouts.player))
         rig.chat.fulfill(where: { $0.system.contains("You are White") }, body: jsonMove("e2e4", ""))
-        try await waitUntil { rig.engine.referee.accepted.count == 1 }
         try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
-        XCTAssertNil(rig.engine.picture.thinkSecondsLeft, "the countdown disappears with the accepted move")
+        XCTAssertEqual(rig.engine.referee.accepted.count, 0)
+        XCTAssertNotNil(rig.engine.picture.thinkSecondsLeft, "preparation remains part of thinking")
         let data = try JSONEncoder().encode(rig.engine.picture)
         var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         legacy.removeValue(forKey: "thinkSecondsLeft")
@@ -442,7 +598,7 @@ final class MatchTests: XCTestCase {
         XCTAssertEqual(rig.engine.referee.position.fen, fen)
     }
 
-    func testCommentaryWaitsUntilTheMoveIsOnTheBoardAndWaitsOnce() async throws {
+    func testCommentaryIsPreparedBeforeTheMoveAndWaitsOnce() async throws {
         let rig = try makeRig()
         try await rig.engine.start(at: 0)
         XCTAssertEqual(rig.engine.picture.thinkingSide, .white)
@@ -453,17 +609,18 @@ final class MatchTests: XCTestCase {
 
         rig.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove("e2e4", "After you."))
         try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
-        XCTAssertEqual(rig.engine.boardVersion, 1)
+        XCTAssertEqual(rig.engine.boardVersion, 0)
         XCTAssertEqual(rig.engine.hostBoardVersions, [1])
-        XCTAssertEqual(rig.engine.scene.node(named: "piece-pawn-e4") == nil, false)
-        XCTAssertEqual(rig.engine.picture.replies.map(\.side), [.white])
-        XCTAssertEqual(rig.engine.picture.replies.map(\.name), ["Grok"])
-        XCTAssertTrue(rig.engine.picture.replies[0].text.contains("e2e4"))
-        XCTAssertTrue(rig.engine.picture.replies[0].text.contains("After you."))
-        XCTAssertNil(rig.engine.picture.thinkingSide)
-
+        XCTAssertNil(rig.engine.scene.node(named: "piece-pawn-e4"))
+        XCTAssertEqual(rig.engine.picture.thinkingSide, .white)
         rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "The pawn has left home and already looks unsure.")
         try await waitUntil { rig.engine.speech.contains { $0.kind == .move } }
+        XCTAssertNotNil(rig.engine.scene.node(named: "piece-pawn-e4"))
+        XCTAssertEqual(rig.engine.picture.replies.map(\.side), [.white])
+        XCTAssertEqual(rig.engine.picture.replies.map(\.name), ["Grok"])
+        let reply = try XCTUnwrap(rig.engine.picture.replies.first)
+        XCTAssertTrue(reply.text.contains("e2e4"))
+        XCTAssertTrue(reply.text.contains("After you."))
         XCTAssertEqual(rig.engine.speech.filter { $0.kind == .move }.map(\.boardVersion), [1])
 
         let fresh = try makeRig()
@@ -482,7 +639,7 @@ final class MatchTests: XCTestCase {
         await cancelled.engine.advance(to: 20)
         try await waitUntil { cancelled.chat.calls.contains { $0.system.contains("Do not name a move") } }
         cancelled.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove("e2e4", "Soon."))
-        try await waitUntil { cancelled.engine.boardVersion == 1 }
+        try await waitUntil { cancelled.engine.phase == "preparing" }
         cancelled.chat.fulfill(where: { $0.system.contains("Do not name a move") }, body: "Too late to narrate the wait.")
         try await waitUntil { cancelled.chat.calls.contains { $0.system.contains("already on the board") } }
         cancelled.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "There it is.")
@@ -537,7 +694,6 @@ final class MatchTests: XCTestCase {
             await rig.engine.advance(to: mark - 40)
             await rig.engine.advance(to: mark)
             rig.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove(move, "Go."))
-            try await waitUntil { rig.engine.referee.accepted.count == index + 1 }
             try await waitUntil { rig.chat.calls.filter { $0.system.contains("already on the board") }.count == index + 1 }
             rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "The game continues.")
             try await waitUntil { rig.engine.moveRequestCount == index + 2 }
@@ -607,11 +763,9 @@ final class MatchTests: XCTestCase {
         try await Task.sleep(nanoseconds: 30_000_000)
         XCTAssertEqual(rig.engine.boardVersion, 0)
         rig.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove("e2e4", "current"))
-        try await waitUntil { rig.engine.boardVersion == 1 }
-        XCTAssertFalse(rig.engine.canRepeatPlayerRequest)
-        let count = rig.engine.moveRequestCount
-        rig.engine.repeatPlayerRequest()
-        XCTAssertEqual(rig.engine.moveRequestCount, count)
+        try await waitUntil { rig.engine.phase == "preparing" }
+        XCTAssertEqual(rig.engine.boardVersion, 0)
+        XCTAssertTrue(rig.engine.canRepeatPlayerRequest)
         try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
         rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "White played.")
         try await waitUntil { rig.chat.calls.contains { $0.system.contains("You are Black") } }
@@ -663,6 +817,8 @@ final class MatchTests: XCTestCase {
         try await Task.sleep(nanoseconds: 30_000_000)
         XCTAssertEqual(rig.engine.boardVersion, 0)
         rig.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove("e2e4", "current"))
+        try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
+        rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "White played.")
         try await waitUntil { rig.engine.boardVersion == 1 }
         XCTAssertEqual(rig.engine.referee.accepted.first?.move.uci, "e2e4")
         XCTAssertTrue(log.entries.contains { $0.response?.contains("e2e4") == true && $0.status == .received })
@@ -748,12 +904,14 @@ final class MatchTests: XCTestCase {
         try await waitUntil { rig.chat.calls.contains { $0.system.contains("JSON") } }
         rig.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove("d8h4", ""))
         try await waitUntil { rig.chat.calls.contains { $0.user.contains("Result:") } }
-        XCTAssertEqual(rig.engine.phase, "summary")
+        XCTAssertEqual(rig.engine.phase, "preparing")
         XCTAssertEqual(rig.engine.finalCards, 0)
         XCTAssertNil(rig.engine.picture.banner)
-        let finalFEN = rig.engine.referee.position.fen
+        let previousFEN = rig.engine.referee.position.fen
         rig.chat.fulfill(where: { $0.user.contains("Result:") }, body: "ChatGPT wins. The prognosis was less optimistic than the opening.")
         try await waitUntil { voice.isSpeaking }
+        let finalFEN = rig.engine.referee.position.fen
+        XCTAssertNotEqual(finalFEN, previousFEN)
         XCTAssertTrue(rig.engine.picture.line.contains("prognosis"), "Show the verdict while it is spoken")
         await rig.engine.advance(to: 60)
         XCTAssertEqual(rig.engine.finalCards, 0, "Even a long summary must precede the countdown")
@@ -811,13 +969,16 @@ final class MatchTests: XCTestCase {
         try await rig.engine.closeArchive()
     }
 
-    func testCheckpointIsSavedBeforeHostResponseAndRestoresNextPlayer() async throws {
+    func testCheckpointChangesOnlyWhenPreparedMoveIsPresentedAndRestoresNextPlayer() async throws {
         let first = try makeRig()
         var saved: GameCheckpoint?
         first.engine.onStateChanged = { saved = first.engine.checkpoint }
         try await first.engine.start(at: 47)
         try await waitUntil { first.chat.calls.contains { $0.system.contains("JSON") } }
         first.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove("e2e4", "Opening"))
+        try await waitUntil { first.chat.calls.contains { $0.system.contains("already on the board") } }
+        XCTAssertEqual(saved?.referee.accepted.count, 0, "A pending presentation is not a shown move")
+        first.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "White played.")
         try await waitUntil { saved?.referee.accepted.count == 1 }
         let data = try JSONEncoder().encode(XCTUnwrap(saved))
         XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("CHESSARENA-SECRET-KEY"))

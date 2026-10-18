@@ -195,7 +195,14 @@ public final class ChatGPTConnection: ObservableObject {
                 request.httpBody = try JSONSerialization.data(withJSONObject: [
                     "model": "gpt-4o-mini-tts", "input": "Sound check.", "voice": "onyx", "response_format": "pcm",
                 ])
-                let (data, response) = try await network.loggedData(for: request, operation: .speech)
+                let (data, response) = try await NetworkTrace.track(.speech, request: request) { trace in
+                    let (data, response) = try await network.data(for: request)
+                    await trace.response(response, bytes: data.count)
+                    if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                        throw SpeechFailure.http(http, data: data, subscription: true, secret: token)
+                    }
+                    return (data, response)
+                }
                 let status = (response as? HTTPURLResponse)?.statusCode ?? 0
                 if (200..<300).contains(status), data.count > 2_000 {
                     speechSupported = true
@@ -207,7 +214,7 @@ public final class ChatGPTConnection: ObservableObject {
                 }
             } catch {
                 speechSupported = false
-                speechStatus = "Озвучка по подписке не проверена: \(safeMessage(error)) Остаётся системный голос."
+                speechStatus = "Озвучка по подписке: \(error is SpeechFailure || error is URLError ? SpeechFailure.describe(error) : safeMessage(error)) Остаётся системный голос."
             }
         }
     }

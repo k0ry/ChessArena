@@ -176,6 +176,52 @@ final class BroadcastTests: XCTestCase {
 }
 
 final class ArchiveTests: XCTestCase {
+    func testArchivePreservesSpeechGapsAndResamplesInput() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let archive = MatchArchive(directory: directory, whiteName: "White", blackName: "Black")
+        try archive.open()
+        archive.append(pixelBuffer: FrameBuffer.make(), at: 0)
+        let tone = (0..<24_000).map { Int16(sin(Double($0) * 2 * .pi * 440 / 24_000) * 8000) }
+        archive.appendAudio(tone, sampleRate: 24_000, at: 1)
+        archive.appendAudio(tone, sampleRate: 24_000, at: 4)
+        archive.append(pixelBuffer: FrameBuffer.make(fill: 60), at: 5.2)
+        try await archive.finish(end: nil)
+        let asset = AVURLAsset(url: archive.videoURL)
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        let track = try XCTUnwrap(audioTracks.first)
+        let reader = try AVAssetReader(asset: asset)
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false,
+            AVSampleRateKey: 44_100, AVNumberOfChannelsKey: 1])
+        reader.add(output); XCTAssertTrue(reader.startReading())
+        var ranges: [(Double, Double)] = []
+        var bytes: [UInt8] = []
+        while let sample = output.copyNextSampleBuffer() {
+            let start = CMSampleBufferGetPresentationTimeStamp(sample).seconds
+            ranges.append((start, start + CMSampleBufferGetDuration(sample).seconds))
+            if let block = CMSampleBufferGetDataBuffer(sample) {
+                var chunk = [UInt8](repeating: 0, count: CMBlockBufferGetDataLength(block))
+                _ = chunk.withUnsafeMutableBytes { CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: $0.count, destination: $0.baseAddress!) }
+                bytes.append(contentsOf: chunk)
+            }
+        }
+        XCTAssertEqual(reader.status, .completed)
+        XCTAssertEqual(try XCTUnwrap(ranges.first).0, 0, accuracy: 0.06)
+        XCTAssertEqual(try XCTUnwrap(ranges.last).1, 5, accuracy: 0.06)
+        let decoded = stride(from: 0, to: bytes.count - 1, by: 2).map { Int16(bitPattern: UInt16(bytes[$0]) | UInt16(bytes[$0 + 1]) << 8) }
+        func peak(_ start: Double, _ end: Double) -> Int {
+            decoded.dropFirst(Int(start * 44_100)).prefix(Int((end - start) * 44_100)).map { abs(Int($0)) }.max() ?? 0
+        }
+        XCTAssertLessThan(peak(0, 0.8), 20, "Initial thinking time must be silent")
+        XCTAssertGreaterThan(peak(1.2, 1.8), 1000)
+        XCTAssertLessThan(peak(2.2, 3.8), 20, "Thinking gap must remain in the encoded audio")
+        XCTAssertGreaterThan(peak(4.2, 4.8), 1000)
+        let videoTracks = try await asset.loadTracks(withMediaType: .video)
+        let video = try XCTUnwrap(videoTracks.first)
+        let duration = try await video.load(.timeRange).duration.seconds
+        XCTAssertGreaterThan(duration, 5, "Video uses elapsed time, not the number of captured frames")
+    }
+
     func testVideoSidecarsAndSecretAbsence() async throws {
         let secret = "CHESSARENA-SECRET-KEY-9f3c2a7b"
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

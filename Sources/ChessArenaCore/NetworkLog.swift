@@ -8,6 +8,8 @@ public enum NetworkOperation: String, Sendable {
     case token = "ChatGPT · обмен / обновление сессии"
     case discovery = "ChatGPT · параметры авторизации"
     case keys = "ChatGPT · проверка подписи"
+    case speechAPI = "OpenAI · озвучка по API-ключу"
+    case localSpeech = "Qwen · локальная озвучка MLX"
     case speech = "ChatGPT · проверка озвучки"
     case cliVersion = "Gemini CLI · версия"
     case cliModels = "Gemini CLI · каталог моделей"
@@ -101,6 +103,7 @@ public final class NetworkLog: ObservableObject {
                 let cancelled = error is CancellationError || (error as? URLError)?.code == .cancelled
                 $0.status = cancelled ? .cancelled : .failed
                 if cancelled { $0.error = "Операция отменена." }
+                else if let error = error as? SpeechFailure { $0.error = error.message }
                 else if let error = error as? ChatError { $0.error = error.userMessage }
                 else if let error = error as? URLError { $0.error = Self.networkError(error.code) }
                 else if error is DecodingError || (error as NSError).domain == NSCocoaErrorDomain {

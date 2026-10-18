@@ -52,7 +52,8 @@ struct ControlView: View {
                         .help("Панель «Заметка себе» внизу доски. После запуска скрыта; на запросы, журнал и архив не влияет")
                     Toggle("Показывать колкость игрока на сцене", isOn: $runtime.showTaunts)
                         .help("Последняя колкость сопернику с именем персоны внизу доски. После запуска скрыта; на запросы, журнал и архив не влияет")
-                    if !SystemVoice.hasMaleVoice(for: runtime.language) {
+                    SpeechPanel(runtime: runtime, voice: runtime.voice)
+                    if runtime.voiceProvider == .system && !SystemVoice.hasMaleVoice(for: runtime.language) {
                         Text("Для языка эфира не установлен мужской системный голос, ведущий пока звучит доступным голосом с пониженным тоном. Скачайте \(runtime.language == .russian ? "Yuri (русский)" : "Daniel или Reed (английский)") в Системных настройках → Универсальный доступ → Устный контент → Системный голос → Управление голосами.")
                             .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
                     }
@@ -79,7 +80,8 @@ struct ControlView: View {
                 Button("Начать новую серию", action: runtime.startNewSeries)
                     .help("Начать новую партию и обнулить счёт серии")
                 Button("Стоп", action: runtime.stopMatch).disabled(!runtime.matchRunning)
-                Button("Проверка тона", action: runtime.tone).disabled(runtime.matchRunning)
+                Button("Проверка тона", action: runtime.tone)
+                    .disabled(!runtime.canPreviewVoice || runtime.previewProfile != nil)
             }
             HStack {
                 Button("Повторить запрос", systemImage: "arrow.clockwise", action: runtime.repeatPlayerRequest)
@@ -285,5 +287,63 @@ private struct GeminiPanel: View {
             Text("Сессия хранится в локальном Antigravity CLI. Проверка модели отправляет один тестовый ход. Доступ и квота зависят от Google-аккаунта.")
                 .font(.caption).foregroundStyle(.secondary)
         }.padding(14).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+private struct SpeechPanel: View {
+    @ObservedObject var runtime: MatchRuntime
+    @ObservedObject var voice: BroadcastVoice
+    @State private var showPersonas = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("Озвучка", selection: $runtime.voiceProvider) {
+                Text("Системные голоса").tag(VoiceProviderChoice.system)
+                Text("OpenAI · API-ключ").tag(VoiceProviderChoice.openAIKey)
+                Text("Qwen3-TTS · локально").tag(VoiceProviderChoice.localQwen)
+            }.disabled(runtime.previewProfile != nil)
+            if runtime.voiceProvider == .openAIKey {
+                SecureField("Отдельный API-ключ OpenAI для речи", text: $runtime.speechKey)
+                Picker("Голос ведущего", selection: $runtime.openAIVoice) {
+                    ForEach(BroadcastVoice.voices, id: \.self) { Text($0).tag($0) }
+                }
+                Text("Голоса созданы ИИ. API оплачивается отдельно от подписки ChatGPT. Ключ хранится в Keychain; при ошибке звучит системный голос.").font(.caption)
+            }
+            if runtime.voiceProvider == .localQwen {
+                Picker("Голос ведущего", selection: $runtime.qwenVoice) {
+                    ForEach(LocalQwenConfiguration.voices, id: \.self) { Text($0).tag($0) }
+                }.disabled(runtime.previewProfile != nil)
+                Button("Послушать ведущего") { runtime.previewVoice(.host) }
+                    .disabled(!runtime.canPreviewVoice || runtime.previewProfile != nil)
+                DisclosureGroup("Голоса игроков", isExpanded: $showPersonas) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Белые: \(runtime.personaLabel(for: runtime.whitePlayer)) · Чёрные: \(runtime.personaLabel(for: runtime.blackPlayer))")
+                            .font(.caption).foregroundStyle(.secondary)
+                        ForEach(PlayerPersona.allCases, id: \.self) { persona in
+                            HStack {
+                                Picker(persona.displayName(runtime.language), selection: Binding(
+                                    get: { runtime.qwenCasting.voice(for: persona) },
+                                    set: { runtime.setQwenVoice($0, for: persona) }
+                                )) {
+                                    ForEach(LocalQwenConfiguration.voices, id: \.self) { Text($0).tag($0) }
+                                }.disabled(runtime.previewProfile != nil)
+                                Button { runtime.previewVoice(.persona(persona)) } label: {
+                                    Image(systemName: "play.circle")
+                                }
+                                .accessibilityLabel("Послушать: \(persona.displayName(runtime.language))")
+                                .help("Послушать голос и подачу этой персоны")
+                                .disabled(!runtime.canPreviewVoice || runtime.previewProfile != nil)
+                            }
+                        }
+                        Text("Это характер реплики, а не голос реального комика. По умолчанию у ведущего и восьми персон разные голоса; любой можно заменить.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }.padding(.top, 6)
+                }
+                Text("Qwen3-TTS 1.7B · MLX. Работает на этом Mac без API-ключа. Первый запуск загружает модель в память. Голоса созданы ИИ.").font(.caption)
+            }
+            if runtime.previewProfile != nil {
+                Button("Остановить прослушивание", action: runtime.stopVoicePreview)
+            }
+            Text(voice.status).font(.caption).textSelection(.enabled)
+        }.disabled(runtime.matchRunning)
     }
 }

@@ -45,6 +45,14 @@ final class MatchRuntime: ObservableObject {
     @Published var showTaunts = false
     /// Which comedic persona each model plays; seeded with the initial table when the session has none.
     private var personas = PersonaAssignments.initial
+    @Published var voiceProvider: VoiceProviderChoice = .system { didSet { voice.stop(); voice.provider = voiceProvider; saveState() } }
+    @Published var speechKey = "" { didSet { voice.stop(); voice.apiKey = speechKey; saveKey(speechKey, account: "openai-speech") } }
+    @Published var openAIVoice = "onyx" { didSet { voice.hostVoice = openAIVoice; saveState() } }
+    @Published var qwenVoice = "Ryan" { didSet { voice.stop(); voice.qwenVoice = qwenVoice; saveState() } }
+    @Published var qwenCasting = QwenVoiceCasting() { didSet { voice.stop(); voice.qwenCasting = qwenCasting; saveState() } }
+    @Published private(set) var previewProfile: VoiceProfile?
+    private var voicePreview: Task<Void, Never>?
+    private var previewID = UUID()
     @Published var grokKey = "" { didSet { saveKey(grokKey, account: "grok") } }
     @Published var chatKey = "" { didSet { saveKey(chatKey, account: "chatgpt") } }
     @Published var claudeKey = "" {
@@ -89,7 +97,7 @@ final class MatchRuntime: ObservableObject {
 
     let scene = BoardScene()
     private let secrets = KeychainSecretStore(service: "com.chessarena.broadcast")
-    private let voice = SystemVoice()
+    let voice = BroadcastVoice()
     private var engine: MatchEngine?
     private var startedAt: Date?
     private var ticker: Task<Void, Never>?
@@ -110,9 +118,14 @@ final class MatchRuntime: ObservableObject {
         grokKey = (try? secrets.load(account: "grok")) ?? ""
         chatKey = (try? secrets.load(account: "chatgpt")) ?? ""
         claudeKey = (try? secrets.load(account: "anthropic")) ?? ""
+        speechKey = (try? secrets.load(account: "openai-speech")) ?? ""
         loadScore()
         do {
             if let saved = try sessionStore.load() {
+                voiceProvider = saved.voiceProvider ?? .system
+                openAIVoice = saved.openAIVoice ?? "onyx"
+                qwenVoice = saved.qwenVoice.flatMap { LocalQwenConfiguration.voices.contains($0) ? $0 : nil } ?? "Ryan"
+                qwenCasting = QwenVoiceCasting(entries: saved.qwenPersonaVoices ?? [:])
                 whitePlayer = saved.white
                 blackPlayer = saved.black
                 hostPlayer = saved.hostConfiguration
@@ -182,10 +195,14 @@ final class MatchRuntime: ObservableObject {
                 nextGameIn = Int(MatchSeries.intermission)
             }
         }
-        let saved = SavedSession(game: savedGame, series: series, white: whitePlayer, black: blackPlayer,
+        var saved = SavedSession(game: savedGame, series: series, white: whitePlayer, black: blackPlayer,
                                  hostModel: hostPlayer.model, language: language, useChatGPTLogin: useChatGPTLogin,
                                  camera: scene.cameraCheckpoint, hostProvider: hostPlayer.provider, gameMemory: gameMemory,
                                  claudeAccess: claudeAccess, personas: personas)
+        saved.voiceProvider = voiceProvider
+        saved.openAIVoice = openAIVoice
+        saved.qwenVoice = qwenVoice
+        saved.qwenPersonaVoices = qwenCasting.entries
         do {
             try sessionStore.save(saved)
             if saveFailed { persistenceError = nil; saveFailed = false }
@@ -207,11 +224,38 @@ final class MatchRuntime: ObservableObject {
     }
 
     func tone() {
-        guard engine == nil else { return }
-        Task {
+        previewVoice(.host)
+    }
+
+    var canPreviewVoice: Bool { engine == nil && !matchRunning }
+
+    func previewVoice(_ profile: VoiceProfile) {
+        guard canPreviewVoice, previewProfile == nil else { return }
+        let id = UUID()
+        previewID = id
+        previewProfile = profile
+        voicePreview = Task {
+            guard !Task.isCancelled, canPreviewVoice else { return }
             voice.language = language
-            _ = await voice.speak(language.toneTest, kind: .tone, profile: .host)
+            _ = await voice.speak(profile.previewText(language), kind: .tone, profile: profile)
+            if previewID == id { previewProfile = nil; voicePreview = nil }
         }
+    }
+
+    func stopVoicePreview() {
+        previewID = UUID()
+        voicePreview?.cancel(); voicePreview = nil
+        previewProfile = nil
+        voice.stop()
+    }
+
+    func setQwenVoice(_ name: String, for persona: PlayerPersona) {
+        qwenCasting.setVoice(name, for: persona)
+    }
+
+    func personaLabel(for player: PlayerConfiguration) -> String {
+        personas.persona(provider: player.provider, model: player.model)?.displayName(language)
+            ?? language.text("выберется при старте", "assigned at start")
     }
 
     var canContinueMatch: Bool {
@@ -244,6 +288,7 @@ final class MatchRuntime: ObservableObject {
     }
 
     func stopMatch() {
+        stopVoicePreview()
         series.stop()
         ticker?.cancel(); ticker = nil
         engine?.onStateChanged = nil
@@ -271,6 +316,7 @@ final class MatchRuntime: ObservableObject {
     }
 
     private func launchRound(_ round: UUID, restoring saved: GameCheckpoint? = nil) {
+        stopVoicePreview()
         showResultSplash = false
         savedGame = nil
         scene.show(position: saved?.referee.position ?? .standard())
@@ -370,6 +416,8 @@ final class MatchRuntime: ObservableObject {
 
     func shutdown() {
         saveState()
+        stopVoicePreview()
+        voice.shutdown()
         gemini.cancel()
         claude.cancel()
         GeminiCLI.cancelAll()
@@ -481,6 +529,8 @@ final class MatchRuntime: ObservableObject {
             status = language.text("Итоги партии · комментатор", "Post-game commentary")
         } else if engine.phase == "learning" {
             status = language.text("Игроки сохраняют планы на следующую партию…", "Players are saving plans for the next game…")
+        } else if engine.phase == "preparing" {
+            status = language.text("Ход получен · готовим озвучку и ждём окончания текущей реплики…", "Move received · preparing audio and waiting for the current utterance…")
         } else if engine.paused {
             status = engine.pauseReason ?? language.text("Автоматический повтор запроса…", "Retrying automatically…")
         } else {

@@ -101,6 +101,7 @@ final class GeminiCLITests: XCTestCase {
     func testCompleteUsesLocalProcessAndPrivateAgent() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
+        let counter = directory.appendingPathComponent("attempt").path
         let script = try executable("""
         if [ "$1" = '--version' ]; then printf '1.3.3\\n'; exit; fi
         test -f .agents/agents/chessarena-player.md || exit 9
@@ -110,6 +111,12 @@ final class GeminiCLITests: XCTestCase {
         case "$2" in *NEXT_GAME_ADVICE*) ;; *) exit 15;; esac
         test "$3" = '--model' || exit 13
         test "$4" = 'gemini-selected' || exit 14
+        case "$HTTPS_PROXY" in http://127.0.0.1:*|http*) ;; *) exit 16;; esac
+        if [ ! -f "\(counter)" ]; then
+            touch "\(counter)"
+            printf '%s' '{"status":"ERROR","response":"","error":"write: socket is not connected","num_turns":1}'
+            exit 3
+        fi
         printf '%s' '{"status":"SUCCESS","num_turns":1,"response":"{\\"move\\":\\"e2e4\\",\\"taunt\\":\\"Go.\\"}"}'
         """, in: directory)
         let cli = GeminiCLI(binary: script.path, home: directory)

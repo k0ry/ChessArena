@@ -59,6 +59,9 @@ public final class MatchEngine {
     private var sawFinal = false
     private var replies: [ModelReply] = []
     private var hostCommentaryCount = 0
+    private let presentationGate = SpeechGate()
+    private var archiveOrigin: TimeInterval = 0
+    private var airingAudio: (samples: [Int16], start: TimeInterval, written: Int)?
 
     public init(scene: BoardScene, voice: Voice, transport: ChatTransport, archive: MatchArchive, white: Seat, black: Seat, host: Seat, gameMemory: GameMemory = GameMemory()) {
         self.scene = scene
@@ -119,6 +122,7 @@ public final class MatchEngine {
         guard !started else { return }
         started = true
         clock = time
+        archiveOrigin = time
         try archive.open()
         archive.append(pixelBuffer: FrameBuffer.make())
         scene.show(position: referee.position)
@@ -190,9 +194,7 @@ public final class MatchEngine {
         waitEpoch += 1
         thinkTask?.cancel()
         thinkTask = nil
-        auxiliaryTasks.values.forEach { $0.cancel() }
-        auxiliaryTasks.removeAll()
-        voice.stop()
+        // A repeated player request does not interrupt an already airing commentary.
         paused = false
         pauseReason = nil
         retryAt = nil
@@ -201,12 +203,15 @@ public final class MatchEngine {
     }
 
     public func stop() {
+        flushAiringAudio()
+        airingAudio = nil
         stopped = true
         thinkGeneration += 1
         waitEpoch += 1
         thinkTask?.cancel(); thinkTask = nil
         auxiliaryTasks.values.forEach { $0.cancel() }; auxiliaryTasks.removeAll()
         turnTasks.values.forEach { $0.cancel() }; turnTasks.removeAll()
+        presentationGate.cancelPending()
         retryAt = nil; paused = false
         scene.setThinking(nil)
         voice.stop()
@@ -215,7 +220,21 @@ public final class MatchEngine {
 
     public func appendFrame(_ buffer: CVPixelBuffer) {
         guard archive.isOpen else { return }
-        archive.append(pixelBuffer: buffer)
+        flushAiringAudio()
+        // Keep both writer inputs progressing even during thinking and synthesis.
+        archive.appendSilence(until: max(0, clock - archiveOrigin))
+        archive.append(pixelBuffer: buffer, at: max(0, clock - archiveOrigin))
+    }
+
+    private func flushAiringAudio(completed: Bool = false) {
+        guard var audio = airingAudio, archive.isOpen else { return }
+        let count = completed ? audio.samples.count
+            : min(audio.samples.count, max(0, Int((clock - audio.start) * 44_100)))
+        guard count > audio.written else { return }
+        archive.appendAudio(Array(audio.samples[audio.written..<count]),
+                            at: max(0, audio.start - archiveOrigin) + Double(audio.written) / 44_100)
+        audio.written = count
+        airingAudio = audio
     }
 
     public func closeArchive() async throws {
@@ -261,60 +280,107 @@ public final class MatchEngine {
 
     private func ingest(_ text: String, generation: Int) async {
         guard !stopped, generation == thinkGeneration else { return }
-        thinkTask = nil
         waitEpoch += 1
-        scene.setThinking(nil)
-        picture.thinkingSide = nil
-        picture.thinkingSelfNotes = nil
+        phase = "preparing"
         let side = referee.position.sideToMove
         let seat = side == .white ? white : black
-        noteReply(side: side, name: seat.name, text: text)
         let intent = ChatParser.moveIntent(from: text)
-        let submission = referee.submit(rawMove: intent?.move ?? text, taunt: intent?.taunt ?? "")
+        // Validate off-screen. The saved/live board advances only when its audio is ready to air.
+        var candidate = referee
+        let submission = candidate.submit(rawMove: intent?.move ?? text, taunt: intent?.taunt ?? "")
         switch submission {
         case .accepted(let move, let end):
+            refreshPicture()
+            let nextVersion = boardVersion + 1
+            // The player's line can render while the host is still composing its response.
+            async let tauntWork = prepareTaunt(end == nil ? move.taunt : "", by: seat)
+            let commentary: String
+            if let end {
+                let title = language.result(end, white: white.name, black: black.name)
+                commentary = await hostText(Prompts.final(title: title, moves: candidate.accepted.map(\.san)), trackBoard: false)
+            } else {
+                commentary = await hostText(Prompts.moveCommentary(fen: candidate.position.fen, san: move.san),
+                                            trackBoard: true, version: nextVersion)
+            }
+            guard validTurn(generation) else { return }
+            voice.language = language
+            let prepared = await voice.prepare(commentary, kind: end == nil ? .move : .final, profile: .host)
+            guard validTurn(generation) else { return }
+            let taunt = await tauntWork
+            guard validTurn(generation), await presentationGate.acquire() else { return }
+            defer { presentationGate.release() }
+            guard validTurn(generation) else { return }
+            // The previous utterance and animation are finished. Commit exactly once.
+            thinkTask = nil
+            referee = candidate
+            noteReply(side: side, name: seat.name, text: text)
             if let notes = intent?.selfNotes {
                 if side == .white { whiteSelfNotes = notes } else { blackSelfNotes = notes }
             }
-            lastRejection = nil
-            retryCount = 0
-            boardVersion += 1
-            scene.animate(
-                move: move.move,
-                positionAfter: referee.position,
-                side: mover(of: move),
-                duration: animationDuration
-            )
-            if animationDuration > 0 {
-                animatingUntil = clock + animationDuration
-                phase = "animating"
-            }
+            lastRejection = nil; retryCount = 0
+            boardVersion = nextVersion
+            scene.setThinking(nil)
             picture.taunt = move.taunt
             picture.tauntSide = side
             picture.tauntPersona = seat.persona?.displayName(language)
-            archive.record(move: move, clock: clock)
-            refreshPicture()
+            archive.record(move: move, clock: clock, includeTaunt: taunt == nil)
+            let presentMove = { [self] in
+                scene.animate(move: move.move, positionAfter: candidate.position, side: side, duration: animationDuration)
+                if animationDuration > 0 { animatingUntil = clock + animationDuration }
+                phase = end == nil ? "animating" : "summary"
+                refreshPicture()
+                // The opponent may request/prepare its next turn while this turn is on air.
+                if end == nil { beginThink() }
+            }
             if let end {
-                await finishGame(end)
+                await finishGame(end, preparedSummary: prepared, onStart: presentMove)
             } else {
-                let commentary = await hostText(Prompts.moveCommentary(fen: referee.position.fen, san: move.san), trackBoard: true)
-                guard !stopped else { return }
-                await speak(commentary, kind: .move)
-                guard !stopped else { return }
-                speakTaunt(move.taunt, by: seat)
-                beginThink()
+                if let taunt {
+                    await playPrepared(taunt, version: nextVersion, move: move.move.uci, onStart: presentMove)
+                    guard !stopped, !Task.isCancelled else { return }
+                    await playPrepared(prepared, version: nextVersion)
+                } else {
+                    await playPrepared(prepared, version: nextVersion, onStart: presentMove)
+                }
+                guard !stopped, !Task.isCancelled else { return }
+                await waitForAnimation()
             }
         case .rejected(let reason, _):
+            thinkTask = nil
+            referee = candidate
+            noteReply(side: side, name: seat.name, text: text)
             if let playerLogID { modelLog?.rejectMove(playerLogID, reason: reason, secrets: [seat.apiKey]) }
             lastRejection = reason
             beginThink()
         case .resigned(let end):
+            thinkTask = nil
+            referee = candidate
             if let playerLogID {
                 modelLog?.rejectMove(playerLogID, reason: "Три недопустимых ответа подряд; засчитано поражение.", secrets: [seat.apiKey])
             }
+            guard await presentationGate.acquire() else { return }
+            defer { presentationGate.release() }
+            guard !stopped, !Task.isCancelled else { return }
             await finishGame(end)
         case .ignored:
-            break
+            thinkTask = nil
+        }
+    }
+
+    private func validTurn(_ generation: Int) -> Bool {
+        !stopped && !Task.isCancelled && generation == thinkGeneration
+    }
+
+    private func prepareTaunt(_ text: String, by seat: Seat) async -> PreparedSpeech? {
+        let text = SpokenText.clean(text)
+        guard !text.isEmpty, let persona = seat.persona, !Task.isCancelled else { return nil }
+        voice.language = language
+        return await voice.prepare(text, kind: .taunt, profile: .persona(persona))
+    }
+
+    private func waitForAnimation() async {
+        while animatingUntil != nil, !stopped, !Task.isCancelled {
+            do { try await Task.sleep(nanoseconds: 10_000_000) } catch { return }
         }
     }
 
@@ -353,7 +419,13 @@ public final class MatchEngine {
             defer { self.auxiliaryTasks.removeValue(forKey: taskID) }
             let text = await self.hostText(Prompts.waiting(side: side), trackBoard: false)
             guard epoch == self.waitEpoch, self.phase == "thinking" else { return }
-            await self.speak(text, kind: .wait)
+            self.voice.language = self.language
+            let prepared = await self.voice.prepare(text, kind: .wait, profile: .host)
+            guard epoch == self.waitEpoch, self.phase == "thinking", !self.stopped, !Task.isCancelled,
+                  await self.presentationGate.acquire() else { return }
+            defer { self.presentationGate.release() }
+            guard epoch == self.waitEpoch, self.phase == "thinking", !self.stopped, !Task.isCancelled else { return }
+            await self.playPrepared(prepared, version: self.boardVersion)
         }
         auxiliaryTasks[taskID] = task
     }
@@ -376,7 +448,7 @@ public final class MatchEngine {
         }
     }
 
-    private func finishGame(_ end: GameEnd) async {
+    private func finishGame(_ end: GameEnd, preparedSummary: PreparedSpeech? = nil, onStart: @escaping @MainActor () -> Void = {}) async {
         thinkTask?.cancel()
         thinkTask = nil
         archive.markResult(end)
@@ -392,9 +464,16 @@ public final class MatchEngine {
         }
         async let whiteAdvice: Void = prepareNextGame(for: white, result: reviewResult)
         async let blackAdvice: Void = prepareNextGame(for: black, result: reviewResult)
-        let summary = await hostText(Prompts.final(title: title, moves: referee.accepted.map(\.san)), trackBoard: false)
+        let prepared: PreparedSpeech
+        if let preparedSummary { prepared = preparedSummary }
+        else {
+            let summary = await hostText(Prompts.final(title: title, moves: referee.accepted.map(\.san)), trackBoard: false)
+            voice.language = language
+            prepared = await voice.prepare(summary, kind: .final, profile: .host)
+        }
         guard !stopped, !Task.isCancelled else { return }
-        await speak(summary, kind: .final)
+        await playPrepared(prepared, version: boardVersion, onStart: onStart)
+        await waitForAnimation()
         guard !stopped, !Task.isCancelled else { return }
         phase = "learning"
         refreshPicture()
@@ -423,60 +502,42 @@ public final class MatchEngine {
     }
 
     private func speak(_ text: String, kind: SpeechKind) async {
-        let spoken = SpokenText.clean(text)
-        guard !stopped, !Task.isCancelled, !spoken.isEmpty else { return }
-        picture.line = spoken
-        refreshPicture()
-        voice.language = language
-        let samples: [Int16]
-        do {
-            samples = try await RequestDeadline.run(seconds: 20) { [voice] in
-                await voice.speak(spoken, kind: kind, profile: .host)
-            }
-        } catch {
-            voice.stop()
-            samples = []
-        }
         guard !stopped, !Task.isCancelled else { return }
-        let line = SpokenLine(kind: kind, text: spoken, boardVersion: boardVersion, clock: clock)
-        speech.append(line)
-        if archive.isOpen, kind != .tone {
-            archive.record(line: line)
-            archive.appendAudio(samples)
+        voice.language = language
+        let prepared = await voice.prepare(text, kind: kind, profile: .host)
+        guard !stopped, !Task.isCancelled, await presentationGate.acquire() else { return }
+        defer { presentationGate.release() }
+        await playPrepared(prepared, version: boardVersion)
+    }
+
+    /// Caller owns presentationGate for the entire turn (player line, commentary and animation).
+    private func playPrepared(_ prepared: PreparedSpeech, version: Int, move: String? = nil,
+                              onStart: @escaping @MainActor () -> Void = {}) async {
+        guard !stopped, !Task.isCancelled else { return }
+        var startedAt: TimeInterval?
+        _ = await voice.play(prepared) { [self] in
+            guard !stopped, !Task.isCancelled else { return }
+            startedAt = clock
+            airingAudio = (prepared.samples, clock, 0)
+            picture.line = prepared.kind == .taunt ? "" : prepared.text
+            onStart()
+            refreshPicture()
         }
-        picture.line = spoken
+        guard !stopped, !Task.isCancelled, let startedAt else { return }
+        flushAiringAudio(completed: true)
+        airingAudio = nil
+        let line = SpokenLine(kind: prepared.kind, text: prepared.text, boardVersion: version, clock: startedAt)
+        if prepared.kind == .taunt { spokenTaunts.append(line) }
+        else { speech.append(line) }
+        if archive.isOpen, prepared.kind != .tone {
+            archive.record(line: line, move: move)
+        }
         refreshPicture()
     }
 
-    /// The mover's taunt in its persona voice, after the host's comment. The next move request does not wait for it.
-    /// The journal already holds the taunt text from the move record; only the audio joins the archive.
-    private func speakTaunt(_ text: String, by seat: Seat) {
-        let spoken = SpokenText.clean(text)
-        guard !stopped, !spoken.isEmpty, let persona = seat.persona else { return }
-        let taskID = UUID()
-        let task = Task { [weak self] in
-            guard let self else { return }
-            defer { self.auxiliaryTasks.removeValue(forKey: taskID) }
-            self.voice.language = self.language
-            let samples: [Int16]
-            do {
-                samples = try await RequestDeadline.run(seconds: 20) { [voice] in
-                    await voice.speak(spoken, kind: .taunt, profile: .persona(persona))
-                }
-            } catch {
-                self.voice.stop()
-                samples = []
-            }
-            guard !self.stopped, !Task.isCancelled else { return }
-            self.spokenTaunts.append(SpokenLine(kind: .taunt, text: spoken, boardVersion: self.boardVersion, clock: self.clock))
-            if self.archive.isOpen { self.archive.appendAudio(samples) }
-        }
-        auxiliaryTasks[taskID] = task
-    }
-
-    private func hostText(_ prompt: (system: String, user: String), trackBoard: Bool) async -> String {
+    private func hostText(_ prompt: (system: String, user: String), trackBoard: Bool, version: Int? = nil) async -> String {
         if trackBoard {
-            hostBoardVersions.append(boardVersion)
+            hostBoardVersions.append(version ?? boardVersion)
         }
         let style = CommentaryStyle.turn(hostCommentaryCount)
         let variation = hostCommentaryCount / CommentaryStyle.allCases.count
@@ -499,9 +560,7 @@ public final class MatchEngine {
         }
         let commentary = SpokenText.clean(text)
         let spoken = commentary.isEmpty ? fallback(for: prompt.user, style: style, variation: variation) : commentary
-        if prompt.system.contains("from move one") || prompt.system.contains("at most 35") {
-            return limitWords(spoken, max: 35)
-        }
+        // Brevity belongs in the prompt. A word-count slice can cut the final sentence in half.
         return spoken
     }
 
@@ -558,7 +617,7 @@ public final class MatchEngine {
     }
 
     private func refreshPicture(line: String? = nil, banner: String? = nil) {
-        let thinkingSide = phase == "thinking" && thinkTask != nil ? referee.position.sideToMove : nil
+        let thinkingSide = (phase == "thinking" || phase == "preparing") && thinkTask != nil ? referee.position.sideToMove : nil
         // Whole seconds so the checkpoint changes once a second, not once a frame.
         let secondsLeft = thinkingSide == nil ? nil : max(0, Int((thinkDeadline - clock).rounded(.up)))
         // Broadcast only this game's turn note; cross-game advice stays in the model request.

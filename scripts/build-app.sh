@@ -10,6 +10,7 @@ mkdir -p "$app_dir/Contents/Resources"
 cp "$bin_dir/ChessArena" "$app_dir/Contents/MacOS/ChessArena.next"
 mv "$app_dir/Contents/MacOS/ChessArena.next" "$app_dir/Contents/MacOS/ChessArena"
 cp Assets/AppIcon.icns "$app_dir/Contents/Resources/AppIcon.icns"
+cp scripts/qwen-server.py "$app_dir/Contents/Resources/qwen-server.py"
 cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

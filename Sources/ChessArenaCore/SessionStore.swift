@@ -23,6 +23,11 @@ public struct CameraCheckpoint: Codable, Equatable {
 }
 
 public struct SavedSession: Codable {
+    public var voiceProvider: VoiceProviderChoice?
+    public var openAIVoice: String?
+    public var qwenVoice: String?
+    /// Persona raw values to built-in Qwen speakers; absent in older sessions.
+    public var qwenPersonaVoices: [String: String]?
     public var schemaVersion = 1
     public var game: GameCheckpoint?
     public var series: MatchSeries
