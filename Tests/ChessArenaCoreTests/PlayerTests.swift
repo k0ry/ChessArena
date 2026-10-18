@@ -290,6 +290,7 @@ final class MiniHTTPServer: @unchecked Sendable {
     struct Outgoing {
         var status: Int
         var body: Data
+        var headers: [String: String] = [:]
     }
 
     private var listenFD: Int32 = -1
@@ -378,7 +379,8 @@ final class MiniHTTPServer: @unchecked Sendable {
         }
         let incoming = parse(header: header, body: body)
         guard let outgoing = handler?(incoming) else { return }
-        let response = "HTTP/1.1 \(outgoing.status) OK\r\nContent-Length: \(outgoing.body.count)\r\nConnection: close\r\n\r\n"
+        let extraHeaders = outgoing.headers.map { "\($0.key): \($0.value)\r\n" }.joined()
+        let response = "HTTP/1.1 \(outgoing.status) OK\r\nContent-Length: \(outgoing.body.count)\r\n" + extraHeaders + "Connection: close\r\n\r\n"
         var bytes = Data(response.utf8)
         bytes.append(outgoing.body)
         bytes.withUnsafeBytes { raw in

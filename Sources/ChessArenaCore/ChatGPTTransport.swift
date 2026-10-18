@@ -8,9 +8,14 @@ public final class ArenaChatTransport: ChatTransport {
     private let gemini: GeminiCLI?
     private let anthropic: ChatTransport
     private let claude: ClaudeCLI?
+    private let lc0: ChatTransport
+    private let deepseek: ChatTransport
 
     public init(connection: ChatGPTConnection?, api: ChatTransport = URLSessionChatTransport(), network: URLSession = .shared,
-                gemini: GeminiCLI? = nil, anthropic: ChatTransport = AnthropicTransport(), claude: ClaudeCLI? = nil) {
+                gemini: GeminiCLI? = nil, anthropic: ChatTransport = AnthropicTransport(), claude: ClaudeCLI? = nil,
+                deepseek: ChatTransport = DeepSeekTransport(), lc0: ChatTransport = LC0Transport()) {
+        self.lc0 = lc0
+        self.deepseek = deepseek
         self.gemini = gemini
         self.anthropic = anthropic
         self.claude = claude
@@ -18,6 +23,8 @@ public final class ArenaChatTransport: ChatTransport {
     }
 
     public func requestURL(for call: ChatCall) -> URL {
+        if call.route == .lc0 { return LC0Transport.localURL }
+        if call.route == .deepseek { return deepseek.requestURL(for: call) }
         if call.route == .geminiCLI { return URL(string: "local-cli://antigravity")! }
         if call.route == .anthropic { return call.url }
         if call.route == .claudeCLI { return ClaudeCLI.localURL }
@@ -28,6 +35,8 @@ public final class ArenaChatTransport: ChatTransport {
     }
 
     public func complete(_ call: ChatCall) async throws -> String {
+        if call.route == .lc0 { return try await lc0.complete(call) }
+        if call.route == .deepseek { return try await deepseek.complete(call) }
         if call.route == .geminiCLI {
             guard let gemini else { throw ChatError.cli(.missing) }
             return try await gemini.complete(call)

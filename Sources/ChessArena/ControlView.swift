@@ -44,6 +44,12 @@ struct ControlView: View {
                     if runtime.needsClaude {
                         ClaudePanel(runtime: runtime, connection: runtime.claude)
                     }
+                    if runtime.needsLC0 {
+                        LC0Panel(connection: runtime.lc0, locked: runtime.matchRunning && !runtime.paused)
+                    }
+                    if runtime.needsDeepSeek {
+                        DeepSeekPanel(runtime: runtime, connection: runtime.deepseek)
+                    }
                     Picker("Язык эфира и озвучки", selection: $runtime.language) {
                         ForEach(BroadcastLanguage.allCases) { Text($0.name).tag($0) }
                     }
@@ -123,10 +129,12 @@ private struct PlayerPanel: View {
         VStack(alignment: .leading, spacing: 10) {
             Label(title, systemImage: "circle.fill").foregroundStyle(color).font(.caption.bold())
             Picker("Нейросеть", selection: $player.provider) {
-                ForEach(NeuralProvider.allCases.filter { !isHost || $0 != .gemini }) { Text($0.rawValue).tag($0) }
+                ForEach(NeuralProvider.allCases.filter { !isHost || $0.supportsHost }) { Text($0.rawValue).tag($0) }
             }
             .disabled(runtime.matchRunning)
-            if player.provider == .gemini {
+            if player.provider == .lc0 {
+                Text("Leela Chess Zero · локальный UCI").font(.caption).foregroundStyle(.secondary)
+            } else if player.provider == .gemini {
                 Picker("Модель", selection: $player.model) {
                     if !gemini.models.contains(where: { $0.id == player.model }) {
                         Text(player.model + " · каталог не проверен").tag(player.model)
@@ -141,6 +149,9 @@ private struct PlayerPanel: View {
                         Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                     }
                 }
+            } else if player.provider == .deepseek {
+                DeepSeekModelPicker(player: $player, connection: runtime.deepseek)
+                    .disabled(runtime.matchRunning && !runtime.paused)
             } else if player.provider == .claude {
                 let catalog = runtime.claudeAccess == .subscription ? ClaudeCLI.aliases : claude.models
                 Picker("Модель", selection: $player.model) {
@@ -171,6 +182,40 @@ private struct PlayerPanel: View {
         .onChange(of: player.provider) { _, _ in runtime.selectAvailableChatGPTModels() }
         .onChange(of: runtime.useChatGPTLogin) { _, _ in runtime.selectAvailableChatGPTModels() }
         .onChange(of: connection.models) { _, _ in runtime.selectAvailableChatGPTModels() }
+    }
+}
+
+private struct DeepSeekModelPicker: View {
+    @Binding var player: PlayerConfiguration
+    @ObservedObject var connection: DeepSeekConnection
+
+    var body: some View {
+        Picker("Модель", selection: $player.model) {
+            if !connection.models.contains(where: { $0.id == player.model }) {
+                Text(player.model + (connection.models.isEmpty ? " · каталог не загружен" : " · нет в каталоге"))
+                    .tag(player.model)
+            }
+            ForEach(connection.models) { Text($0.name).tag($0.id) }
+        }
+        TextField("ID модели DeepSeek вручную", text: $player.model)
+    }
+}
+
+private struct DeepSeekPanel: View {
+    @ObservedObject var runtime: MatchRuntime
+    @ObservedObject var connection: DeepSeekConnection
+    private var locked: Bool { runtime.matchRunning && !runtime.paused }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("ПОДКЛЮЧЕНИЕ DEEPSEEK", systemImage: "key.fill")
+                .foregroundStyle(.cyan).font(.caption.bold())
+            SecureField("API-ключ DeepSeek", text: $runtime.deepSeekKey).disabled(locked)
+            Button("Обновить модели") { connection.refresh(key: runtime.deepSeekKey) }
+                .disabled(locked || connection.busy)
+            Text(connection.status).font(.caption).foregroundStyle(.secondary)
+            Text("Официальный API · thinking high").font(.caption).foregroundStyle(.secondary)
+        }
     }
 }
 
@@ -345,5 +390,51 @@ private struct SpeechPanel: View {
             }
             Text(voice.status).font(.caption).textSelection(.enabled)
         }.disabled(runtime.matchRunning)
+    }
+}
+
+
+private struct LC0Panel: View {
+    @ObservedObject var connection: LC0Connection
+    let locked: Bool
+
+    var body: some View {
+        GroupBox("ПОДКЛЮЧЕНИЕ LC0") {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    TextField("Исполняемый файл lc0", text: $connection.settings.binary)
+                    Button("Выбрать lc0") { chooseFile(weights: false) }
+                }
+                HStack {
+                    TextField("Нейросеть: автопоиск при пустом поле", text: $connection.settings.weights)
+                    Button("Выбрать веса") { chooseFile(weights: true) }
+                }
+                Picker("Вычисления", selection: $connection.settings.backend) {
+                    Text("По умолчанию движка").tag("")
+                    Text("Metal · GPU Apple").tag("metal")
+                    Text("BLAS · CPU").tag("blas")
+                    Text("Eigen · CPU").tag("eigen")
+                }
+                Stepper("Время на ход: \(connection.settings.moveSeconds) с", value: $connection.settings.moveSeconds, in: 1...60)
+                HStack {
+                    Button("Проверить LC0") { connection.verify() }.disabled(connection.busy)
+                    if connection.busy { ProgressView().controlSize(.small) }
+                }
+                Text(connection.status).font(.caption).textSelection(.enabled)
+                Text("Общие настройки для обоих игроков LC0. Движок выбирает ходы, выбранный ведущий комментирует партию.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(8)
+            .disabled(locked)
+        }
+    }
+
+    private func chooseFile(weights: Bool) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url {
+            if weights { connection.settings.weights = url.path }
+            else { connection.settings.binary = url.path }
+        }
     }
 }

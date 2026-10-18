@@ -8,6 +8,8 @@ final class MatchRuntime: ObservableObject {
     let chatGPT = ChatGPTConnection()
     let gemini = GeminiConnection()
     let claude = ClaudeConnection()
+    let deepseek = DeepSeekConnection()
+    let lc0 = LC0Connection()
     let modelLog = ModelLog()
     private var logWindow: NSWindow?
     private var networkLogWindow: NSWindow?
@@ -55,6 +57,12 @@ final class MatchRuntime: ObservableObject {
     private var previewID = UUID()
     @Published var grokKey = "" { didSet { saveKey(grokKey, account: "grok") } }
     @Published var chatKey = "" { didSet { saveKey(chatKey, account: "chatgpt") } }
+    @Published var deepSeekKey = "" {
+        didSet {
+            saveKey(deepSeekKey, account: "deepseek")
+            if deepSeekKey != oldValue { deepseek.keyChanged() }
+        }
+    }
     @Published var claudeKey = "" {
         didSet {
             saveKey(claudeKey, account: "anthropic")
@@ -118,6 +126,7 @@ final class MatchRuntime: ObservableObject {
         grokKey = (try? secrets.load(account: "grok")) ?? ""
         chatKey = (try? secrets.load(account: "chatgpt")) ?? ""
         claudeKey = (try? secrets.load(account: "anthropic")) ?? ""
+        deepSeekKey = (try? secrets.load(account: "deepseek")) ?? ""
         speechKey = (try? secrets.load(account: "openai-speech")) ?? ""
         loadScore()
         do {
@@ -319,7 +328,7 @@ final class MatchRuntime: ObservableObject {
         stopVoicePreview()
         showResultSplash = false
         savedGame = nil
-        scene.show(position: saved?.referee.position ?? .standard())
+        scene.resetBoard(position: saved?.referee.position ?? .standard())
         let folder = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ChessArena", isDirectory: true)
             .appendingPathComponent(ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-") + "-" + round.uuidString + "-" + UUID().uuidString, isDirectory: true)
@@ -329,7 +338,7 @@ final class MatchRuntime: ObservableObject {
         let match = MatchEngine(
             scene: scene,
             voice: voice,
-            transport: ArenaChatTransport(connection: useChatGPTLogin ? chatGPT : nil, gemini: gemini.cli, claude: claude.cli),
+            transport: ArenaChatTransport(connection: useChatGPTLogin ? chatGPT : nil, gemini: gemini.cli, claude: claude.cli, lc0: lc0.transport),
             archive: archive,
             white: white,
             black: black,
@@ -403,7 +412,9 @@ final class MatchRuntime: ObservableObject {
 
     var needsGemini: Bool { configurations.contains { $0.provider == .gemini } }
     var needsClaude: Bool { configurations.contains { $0.provider == .claude } }
-    private var keys: ProviderKeys { ProviderKeys(grok: grokKey, chatGPT: chatKey, anthropic: claudeKey, claudeAccess: claudeAccess) }
+    var needsLC0: Bool { [whitePlayer, blackPlayer].contains { $0.provider == .lc0 } }
+    var needsDeepSeek: Bool { [whitePlayer, blackPlayer].contains { $0.provider == .deepseek } }
+    private var keys: ProviderKeys { ProviderKeys(grok: grokKey, chatGPT: chatKey, anthropic: claudeKey, claudeAccess: claudeAccess, deepseek: deepSeekKey) }
 
     /// A player seat with its persona; first encounters draw a free persona and persist it with the session.
     private func playerSeat(_ player: PlayerConfiguration, side: Side) -> Seat {
@@ -420,6 +431,8 @@ final class MatchRuntime: ObservableObject {
         voice.shutdown()
         gemini.cancel()
         claude.cancel()
+        deepseek.cancel()
+        lc0.cancel()
         GeminiCLI.cancelAll()
         ClaudeCLI.cancelAll()
     }
@@ -458,6 +471,14 @@ final class MatchRuntime: ObservableObject {
     }
 
     private func validatePlayers() -> Bool {
+        if needsLC0 {
+            guard !lc0.busy else { status = "Дождитесь проверки LC0"; return false }
+            do { try lc0.settings.validate() }
+            catch { status = (error as? ChatError)?.userMessage ?? LC0Error.execution.userMessage; return false }
+        }
+        if needsDeepSeek, deepSeekKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            status = "Введите API-ключ DeepSeek для выбранных игроков"; return false
+        }
         if needsClaude {
             switch claudeAccess {
             case .apiKey:

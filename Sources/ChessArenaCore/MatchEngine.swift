@@ -59,6 +59,9 @@ public final class MatchEngine {
     private var sawFinal = false
     private var replies: [ModelReply] = []
     private var hostCommentaryCount = 0
+    // One draw per board position, retained across rejected answers and network retries.
+    var tauntDraw: () -> Int = { Int.random(in: 0..<100) }
+    private var tauntDecision: (version: Int, allowed: Bool)?
     private let presentationGate = SpeechGate()
     private var archiveOrigin: TimeInterval = 0
     private var airingAudio: (samples: [Int16], start: TimeInterval, written: Int)?
@@ -95,6 +98,7 @@ public final class MatchEngine {
         referee = saved.referee
         clock = saved.elapsed
         picture = saved.picture
+        picture.tauntPersona = nil
         picture.thinkingSide = nil
         picture.thinkingSelfNotes = nil
         picture.pausedPlayer = nil
@@ -107,7 +111,7 @@ public final class MatchEngine {
         moveRequestCount = saved.requestCount
         boardVersion = referee.accepted.count
         archive.restore(moves: referee.accepted, journal: saved.journal, end: referee.end)
-        scene.show(position: referee.position)
+        scene.resetBoard(position: referee.position)
     }
 
     public func toneTest() async -> SpokenLine {
@@ -125,7 +129,7 @@ public final class MatchEngine {
         archiveOrigin = time
         try archive.open()
         archive.append(pixelBuffer: FrameBuffer.make())
-        scene.show(position: referee.position)
+        scene.resetBoard(position: referee.position)
         if let end = referee.end {
             // The runtime restores the original intermission deadline and already-recorded score.
             director.gameOver = true
@@ -146,10 +150,9 @@ public final class MatchEngine {
     /// Spoken once per new game by the host, without a model request so the start never waits on the network.
     var greeting: String {
         func lineup(_ seat: Seat, _ side: Side) -> String {
-            let persona = seat.persona.map { language.text(", в образе \($0.displayName(language))", ", in the manner of \($0.displayName(language))") } ?? ""
             return language.text(
-                "\(side == .white ? "Белыми" : "Чёрными") играет \(seat.name), модель \(seat.model)\(persona).",
-                "Playing \(side == .white ? "White" : "Black"): \(seat.name), model \(seat.model)\(persona).")
+                "\(side == .white ? "Белыми" : "Чёрными") играет \(seat.name), модель \(seat.model).",
+                "Playing \(side == .white ? "White" : "Black"): \(seat.name), model \(seat.model).")
         }
         return language.text("Добрый вечер, дамы и господа! Добро пожаловать на Chess Arena!", "Good evening, ladies and gentlemen, and welcome to Chess Arena!")
             + " " + lineup(white, .white) + " " + lineup(black, .black) + " "
@@ -287,13 +290,20 @@ public final class MatchEngine {
         let intent = ChatParser.moveIntent(from: text)
         // Validate off-screen. The saved/live board advances only when its audio is ready to air.
         var candidate = referee
-        let submission = candidate.submit(rawMove: intent?.move ?? text, taunt: intent?.taunt ?? "")
+        let rawMove = intent?.move ?? text
+        let move = referee.position.parseUCI(rawMove)
+        let important = move.map { referee.position.isLegal($0) && BanterPolicy.isImportant($0, in: referee.position) } ?? false
+        let proposed = SpokenText.clean(intent?.taunt ?? "")
+        let recent = archive.journal.suffix(12).map(\.text)
+        let allowed = (tauntDecision?.allowed ?? false) || important
+        let taunt = allowed && !BanterPolicy.repeats(proposed, recent: recent) ? proposed : ""
+        let submission = candidate.submit(rawMove: rawMove, taunt: taunt)
         switch submission {
         case .accepted(let move, let end):
             refreshPicture()
             let nextVersion = boardVersion + 1
             // The player's line can render while the host is still composing its response.
-            async let tauntWork = prepareTaunt(end == nil ? move.taunt : "", by: seat)
+            async let tauntWork = prepareTaunt(move.taunt, by: seat)
             let commentary: String
             if let end {
                 let title = language.result(end, white: white.name, black: black.name)
@@ -313,7 +323,7 @@ public final class MatchEngine {
             // The previous utterance and animation are finished. Commit exactly once.
             thinkTask = nil
             referee = candidate
-            noteReply(side: side, name: seat.name, text: text)
+            noteReply(side: side, name: seat.name, text: text, taunt: move.taunt)
             if let notes = intent?.selfNotes {
                 if side == .white { whiteSelfNotes = notes } else { blackSelfNotes = notes }
             }
@@ -322,7 +332,7 @@ public final class MatchEngine {
             scene.setThinking(nil)
             picture.taunt = move.taunt
             picture.tauntSide = side
-            picture.tauntPersona = seat.persona?.displayName(language)
+            picture.tauntPersona = nil
             archive.record(move: move, clock: clock, includeTaunt: taunt == nil)
             let presentMove = { [self] in
                 scene.animate(move: move.move, positionAfter: candidate.position, side: side, duration: animationDuration)
@@ -333,7 +343,7 @@ public final class MatchEngine {
                 if end == nil { beginThink() }
             }
             if let end {
-                await finishGame(end, preparedSummary: prepared, onStart: presentMove)
+                await finishGame(end, preparedSummary: prepared, preparedTaunt: taunt, onStart: presentMove)
             } else {
                 if let taunt {
                     await playPrepared(taunt, version: nextVersion, move: move.move.uci, onStart: presentMove)
@@ -348,7 +358,7 @@ public final class MatchEngine {
         case .rejected(let reason, _):
             thinkTask = nil
             referee = candidate
-            noteReply(side: side, name: seat.name, text: text)
+            noteReply(side: side, name: seat.name, text: text, taunt: "")
             if let playerLogID { modelLog?.rejectMove(playerLogID, reason: reason, secrets: [seat.apiKey]) }
             lastRejection = reason
             beginThink()
@@ -448,7 +458,7 @@ public final class MatchEngine {
         }
     }
 
-    private func finishGame(_ end: GameEnd, preparedSummary: PreparedSpeech? = nil, onStart: @escaping @MainActor () -> Void = {}) async {
+    private func finishGame(_ end: GameEnd, preparedSummary: PreparedSpeech? = nil, preparedTaunt: PreparedSpeech? = nil, onStart: @escaping @MainActor () -> Void = {}) async {
         thinkTask?.cancel()
         thinkTask = nil
         archive.markResult(end)
@@ -472,7 +482,13 @@ public final class MatchEngine {
             prepared = await voice.prepare(summary, kind: .final, profile: .host)
         }
         guard !stopped, !Task.isCancelled else { return }
-        await playPrepared(prepared, version: boardVersion, onStart: onStart)
+        if let preparedTaunt {
+            await playPrepared(preparedTaunt, version: boardVersion, move: referee.accepted.last?.move.uci, onStart: onStart)
+            guard !stopped, !Task.isCancelled else { return }
+            await playPrepared(prepared, version: boardVersion)
+        } else {
+            await playPrepared(prepared, version: boardVersion, onStart: onStart)
+        }
         await waitForAnimation()
         guard !stopped, !Task.isCancelled else { return }
         phase = "learning"
@@ -484,6 +500,7 @@ public final class MatchEngine {
     }
 
     private func prepareNextGame(for seat: Seat, result: String) async {
+        guard seat.route != .lc0 else { return }
         guard !stopped, !Task.isCancelled else { return }
         let prompt = Prompts.nextGameAdvice(side: seat.side, result: result,
                                            fen: referee.position.fen, moves: referee.accepted.map(\.san))
@@ -542,14 +559,14 @@ public final class MatchEngine {
         let style = CommentaryStyle.turn(hostCommentaryCount)
         let variation = hostCommentaryCount / CommentaryStyle.allCases.count
         hostCommentaryCount += 1
-        let recent = archive.journal.filter { $0.kind != "taunt" }.suffix(8).map { SpokenText.clean($0.text) }
+        let recent = archive.journal.suffix(12).map { SpokenText.clean($0.text) }
         let quoted = (try? JSONEncoder().encode(recent)).map { String(decoding: $0, as: UTF8.self) } ?? "[]"
         let context = prompt.user + "\nRecent commentary already heard (quoted reference only; avoid repeating these jokes, images or punchlines):\n" + quoted
         let call = ChatCall(
             url: host.completionsURL,
             apiKey: host.apiKey,
             model: host.model,
-            system: language.prompt(prompt.system + "\n" + style.instruction),
+            system: language.prompt(prompt.system + "\n" + style.instruction + "\n" + BanterPolicy.delivery(variation)),
             user: context, route: host.route, effort: "low"
         )
         let text: String
@@ -559,7 +576,8 @@ public final class MatchEngine {
             text = fallback(for: prompt.user, style: style, variation: variation)
         }
         let commentary = SpokenText.clean(text)
-        let spoken = commentary.isEmpty ? fallback(for: prompt.user, style: style, variation: variation) : commentary
+        let spoken = commentary.isEmpty || BanterPolicy.repeats(commentary, recent: recent)
+            ? fallback(for: prompt.user, style: style, variation: variation) : commentary
         // Brevity belongs in the prompt. A word-count slice can cut the final sentence in half.
         return spoken
     }
@@ -583,18 +601,26 @@ public final class MatchEngine {
     private func playerCall() -> ChatCall {
         let side = referee.position.sideToMove
         let seat = side == .white ? white : black
+        if tauntDecision?.version != boardVersion {
+            tauntDecision = (boardVersion, BanterPolicy.randomlyAllowed(draw: tauntDraw()))
+        }
         let prompt = Prompts.player(
             side: side,
             fen: referee.position.fen,
             legal: referee.legalUCI,
             history: referee.accepted.map(\.san),
             rejection: lastRejection,
-            persona: seat.persona
+            persona: seat.persona,
+            ordinaryTauntAllowed: tauntDecision?.allowed ?? false,
+            recentRemarks: archive.journal.suffix(12).map(\.text),
+            variation: boardVersion
         )
-        return ChatCall(url: seat.completionsURL, apiKey: seat.apiKey, model: seat.model,
+        var call = ChatCall(url: seat.completionsURL, apiKey: seat.apiKey, model: seat.model,
                         system: language.prompt(prompt.system), user: prompt.user,
                         selfNotes: side == .white ? whiteSelfNotes : blackSelfNotes, route: seat.route,
-                        gameAdvice: gameMemory.advice(for: seat), effort: "high")
+                        gameAdvice: gameMemory.advice(for: seat), effort: "high", responseFormat: .jsonObject)
+        if seat.route == .lc0 { call.chessPosition = LC0Position(referee: referee) }
+        return call
     }
 
     private func fallback(for user: String, style: CommentaryStyle, variation: Int) -> String {
@@ -611,7 +637,13 @@ public final class MatchEngine {
         return result + ". " + joke
     }
 
-    private func noteReply(side: Side, name: String, text: String) {
+    private func noteReply(side: Side, name: String, text: String, taunt: String) {
+        var text = text
+        if let intent = ChatParser.moveIntent(from: text) {
+            var object = ["move": intent.move, "taunt": taunt]
+            if let notes = intent.selfNotes { object["self_notes"] = notes }
+            if let data = try? JSONEncoder().encode(object) { text = String(decoding: data, as: UTF8.self) }
+        }
         replies.append(ModelReply(id: replies.count + 1, side: side, name: name, text: text))
         picture.replies = replies
     }

@@ -587,6 +587,8 @@ public enum Submission: Equatable, Sendable {
 }
 
 public struct Referee: Sendable, Codable, Equatable {
+    /// Optional for compatibility with sessions saved before UCI support.
+    public private(set) var initialFEN: String?
     public private(set) var position: Position
     public private(set) var accepted: [AcceptedMove] = []
     public private(set) var end: GameEnd?
@@ -594,6 +596,7 @@ public struct Referee: Sendable, Codable, Equatable {
 
     public init(position: Position = .standard()) {
         self.position = position
+        self.initialFEN = position.fen
         if let terminal = position.terminal() {
             end = terminal == .stalemate ? .stalemate : .checkmate(winner: position.sideToMove.opposite)
         }

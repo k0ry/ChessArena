@@ -2,7 +2,10 @@ import Combine
 import Foundation
 
 public enum NetworkOperation: String, Sendable {
+    case lc0Move = "LC0 · локальный поиск хода"
     case chat = "Запрос к модели"
+    case deepSeekChat = "DeepSeek · запрос к модели"
+    case deepSeekModels = "DeepSeek · каталог моделей"
     case responses = "ChatGPT · поток ответа"
     case models = "ChatGPT · каталог моделей"
     case token = "ChatGPT · обмен / обновление сессии"
@@ -69,7 +72,7 @@ public final class NetworkLog: ObservableObject {
         let id = UUID()
         let method = request.map { ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"].contains($0.httpMethod ?? "GET") ? ($0.httpMethod ?? "GET") : "HTTP" } ?? "CLI"
         entries.insert(NetworkLogEntry(id: id, date: Date(), operation: operation,
-            endpoint: request.map { Self.endpoint($0.url) } ?? (operation.isClaudeCLI ? "local-cli://claude" : "local-cli://antigravity"),
+            endpoint: request.map { Self.endpoint($0.url) } ?? (operation == .lc0Move ? "local-uci://lc0" : operation.isClaudeCLI ? "local-cli://claude" : "local-cli://antigravity"),
             method: method, timeout: request?.timeoutInterval, sentBytes: request?.httpBody?.count), at: 0)
         if entries.count > capacity { entries.removeLast(entries.count - capacity) }
         return id
@@ -78,9 +81,9 @@ public final class NetworkLog: ObservableObject {
     // Known endpoints are enough to diagnose this client's routes. Unknown paths can contain secrets.
     private static func endpoint(_ url: URL?) -> String {
         guard let url else { return "(адрес отсутствует)" }
-        let hosts = ["api.x.ai", "api.openai.com", "auth.openai.com", "api.anthropic.com"]
+        let hosts = ["api.x.ai", "api.openai.com", "auth.openai.com", "api.anthropic.com", "api.deepseek.com"]
         let paths = ["/v1/chat/completions", "/v1/responses", "/v1/models", "/v1/messages", "/v1/audio/speech",
-                     "/api/accounts/oauth/token", "/.well-known/openid-configuration", "/.well-known/jwks.json"]
+                     "/api/accounts/oauth/token", "/.well-known/openid-configuration", "/.well-known/jwks.json", "/chat/completions", "/models"]
         let host = hosts.contains(url.host ?? "") ? url.host! : "[сервер скрыт]"
         let path = paths.contains(url.path) ? url.path : "/[путь скрыт]"
         return (url.scheme == "https" ? "https://" : "http://") + host + path

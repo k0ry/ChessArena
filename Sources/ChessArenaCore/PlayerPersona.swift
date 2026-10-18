@@ -6,14 +6,14 @@ public enum PlayerPersona: String, CaseIterable, Codable, Sendable {
 
     public func displayName(_ language: BroadcastLanguage) -> String {
         switch self {
-        case .carrey: return language.text("Джим Керри", "Jim Carrey")
-        case .pryor: return language.text("Ричард Прайор", "Richard Pryor")
-        case .carlin: return language.text("Джордж Карлин", "George Carlin")
-        case .chappelle: return language.text("Дейв Шаппелл", "Dave Chappelle")
-        case .louisCK: return language.text("Луи Си Кей", "Louis C.K.")
-        case .burr: return language.text("Билл Бёрр", "Bill Burr")
-        case .gervais: return language.text("Рики Джервейс", "Ricky Gervais")
-        case .burnham: return language.text("Бо Бернем", "Bo Burnham")
+        case .carrey: return language.text("Эксцентрик", "Eccentric")
+        case .pryor: return language.text("Рассказчик", "Storyteller")
+        case .carlin: return language.text("Сатирик", "Satirist")
+        case .chappelle: return language.text("Иронист", "Ironist")
+        case .louisCK: return language.text("Скептик", "Skeptic")
+        case .burr: return language.text("Спорщик", "Challenger")
+        case .gervais: return language.text("Острослов", "Dry wit")
+        case .burnham: return language.text("Абсурдист", "Absurdist")
         }
     }
 
@@ -38,7 +38,7 @@ public enum PlayerPersona: String, CaseIterable, Codable, Sendable {
         case .burnham:
             manner = "theatrical, wordplay-heavy self-aware wit: a rhyme or a twisted idiom, a nod to the absurdity of two machines trash-talking over chess."
         }
-        return "Taunt persona: deliver the taunt with \(manner) Address it to your opponent as one short sentence. "
+        return "Taunt persona: deliver the taunt with \(manner) Use this as a loose palette, not a fixed setup or catchphrase. If a taunt is allowed, address it to your opponent as one short sentence. "
             + "Stay original: no quotations or catchphrases, never name or claim to be any real person, no slurs, no profanity, "
             + "no remarks about anyone's identity. The persona changes only the taunt, never the move or the output format."
     }

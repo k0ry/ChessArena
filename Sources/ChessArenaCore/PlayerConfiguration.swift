@@ -5,14 +5,19 @@ public enum NeuralProvider: String, CaseIterable, Identifiable, Sendable, Codabl
     case chatGPT = "ChatGPT"
     case gemini = "Gemini"
     case claude = "Claude"
+    case deepseek = "DeepSeek"
+    case lc0 = "LC0"
 
     public var id: String { rawValue }
+    public var supportsHost: Bool { self != .gemini && self != .deepseek && self != .lc0 }
     public var defaultModel: String {
         switch self {
         case .grok: return ModelCatalog.grokModel
         case .chatGPT: return ModelCatalog.chatGPTModel
         case .gemini: return GeminiCLI.defaultModel
         case .claude: return ModelCatalog.claudeModel
+        case .deepseek: return ModelCatalog.deepSeekModel
+        case .lc0: return "Leela Chess Zero"
         }
     }
     /// Default access point; Claude's actual route depends on the chosen access mode in `ProviderKeys`.
@@ -22,6 +27,8 @@ public enum NeuralProvider: String, CaseIterable, Identifiable, Sendable, Codabl
         case .chatGPT: return ModelCatalog.openAIAPI
         case .gemini: return URL(string: "local-cli://antigravity")!
         case .claude: return ModelCatalog.anthropicAPI
+        case .deepseek: return ModelCatalog.deepSeekAPI
+        case .lc0: return LC0Transport.localURL
         }
     }
 }
@@ -36,10 +43,12 @@ public struct ProviderKeys: Equatable, Sendable {
     public var grok: String
     public var chatGPT: String
     public var anthropic: String
+    public var deepseek: String
     public var claudeAccess: ClaudeAccess
 
-    public init(grok: String = "", chatGPT: String = "", anthropic: String = "", claudeAccess: ClaudeAccess = .subscription) {
+    public init(grok: String = "", chatGPT: String = "", anthropic: String = "", claudeAccess: ClaudeAccess = .subscription, deepseek: String = "") {
         self.grok = grok; self.chatGPT = chatGPT; self.anthropic = anthropic; self.claudeAccess = claudeAccess
+        self.deepseek = deepseek
     }
 
     public func key(for provider: NeuralProvider) -> String {
@@ -48,7 +57,8 @@ public struct ProviderKeys: Equatable, Sendable {
         case .grok: value = grok
         case .chatGPT: value = chatGPT
         case .claude: value = claudeAccess == .apiKey ? anthropic : ""
-        case .gemini: value = ""
+        case .gemini, .lc0: value = ""
+        case .deepseek: value = deepseek
         }
         return value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -58,6 +68,8 @@ public struct ProviderKeys: Equatable, Sendable {
         case .gemini: return .geminiCLI
         case .claude: return claudeAccess == .apiKey ? .anthropic : .claudeCLI
         case .grok, .chatGPT: return .http
+        case .deepseek: return .deepseek
+        case .lc0: return .lc0
         }
     }
 

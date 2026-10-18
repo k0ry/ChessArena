@@ -165,23 +165,32 @@ public final class BoardScene: ObservableObject {
     }
 
     public func setThinking(_ side: Side?) {
+        pulseNode.removeAllActions()
         guard let side else {
             pulseNode.isHidden = true
+            pulseNode.name = "pulse"
+            pulseNode.opacity = 1
             return
         }
         pulseNode.isHidden = false
-        pulseNode.removeAllActions()
         pulseNode.runAction(.repeatForever(.sequence([.fadeOpacity(to: 0.15, duration: 1.3), .fadeOpacity(to: 0.55, duration: 1.3)])))
         pulseNode.name = side == .white ? "pulse-white" : "pulse-black"
         pulseNode.geometry?.firstMaterial = material(ArenaPalette.color(for: side), transparent: true)
         pulseNode.position = SCNVector3(0, 0.2, side == .white ? -2 : 2)
     }
 
+    /// Starts a clean board without changing the operator's camera framing.
+    public func resetBoard(position: Position = .standard()) {
+        setThinking(nil)
+        clearTrails()
+        show(position: position)
+    }
+
     public func show(position: Position) {
         clearCaptureEffects()
         isAnimating = false
         displayedPosition = position
-        pieceNodes.values.forEach { $0.removeFromParentNode() }
+        pieceNodes.values.forEach { $0.removeAllActions(); $0.removeFromParentNode() }
         pieceNodes.removeAll()
         for index in 0..<64 {
             guard let piece = position.squares[index] else { continue }

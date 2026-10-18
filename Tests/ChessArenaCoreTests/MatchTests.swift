@@ -4,6 +4,99 @@ import XCTest
 
 @MainActor
 final class MatchTests: XCTestCase {
+    func testFreshMatchResetsReusedBoardBeforeRequestingOpeningMove() async throws {
+        let rig = try makeRig()
+        let position = Position.standard()
+        let move = try XCTUnwrap(position.parseUCI("e2e4"))
+        rig.engine.scene.animate(move: move, positionAfter: position.applying(move), side: .white, duration: 30)
+        rig.engine.scene.setThinking(.black)
+        XCTAssertNotNil(rig.engine.scene.node(named: "trail-cold-e2e4"))
+
+        try await rig.engine.start(at: 0)
+        try await waitUntil { rig.chat.calls.count == 1 }
+        XCTAssertEqual(rig.engine.referee.position, .standard())
+        XCTAssertTrue(rig.chat.calls[0].user.contains(Position.standard().fen))
+        XCTAssertTrue(rig.engine.referee.accepted.isEmpty)
+        XCTAssertFalse(rig.engine.scene.isAnimating)
+        XCTAssertNil(rig.engine.scene.node(named: "trail-cold-e2e4"))
+        XCTAssertNil(rig.engine.scene.node(named: "piece-pawn-e4"))
+        XCTAssertNotNil(rig.engine.scene.node(named: "piece-pawn-e2"))
+        XCTAssertNil(rig.engine.scene.node(named: "pulse-black"))
+        XCTAssertNotNil(rig.engine.scene.node(named: "pulse-white"))
+        rig.engine.stop()
+        try await rig.engine.closeArchive()
+    }
+
+    func testDeepSeekRetryUsesUpdatedConfigurationWithoutChangingPositionOrNotes() async throws {
+        let rig = try makeRig(whitePlayer: .init(provider: .deepseek))
+        var saved = rig.engine.checkpoint
+        saved.whiteSelfNotes = "ACCEPTED_PLAN"
+        rig.engine.restore(saved)
+        try await rig.engine.start(at: 0)
+        try await waitUntil { rig.chat.calls.count == 1 }
+        let fen = rig.engine.referee.position.fen
+        rig.chat.fail(where: { $0.route == .deepseek }, error: .http(status: 402, reason: .balance))
+        try await waitUntil { rig.engine.paused }
+        XCTAssertNotNil(rig.engine.retryAt)
+        XCTAssertEqual(rig.engine.referee.position.fen, fen)
+        XCTAssertTrue(rig.engine.pauseReason?.contains("балансе DeepSeek") == true)
+        rig.engine.white.apiKey = "corrected-key"
+        rig.engine.white.model = "deepseek-flash"
+        await rig.engine.advance(to: try XCTUnwrap(rig.engine.retryAt))
+        try await waitUntil { rig.chat.calls.count == 2 }
+        let retry = try XCTUnwrap(rig.chat.calls.last)
+        XCTAssertEqual(retry.apiKey, "corrected-key")
+        XCTAssertEqual(retry.model, "deepseek-flash")
+        XCTAssertEqual(retry.route, .deepseek)
+        XCTAssertTrue(retry.user.contains(fen))
+        XCTAssertEqual(retry.selfNotes, "ACCEPTED_PLAN")
+        rig.chat.fail(where: { $0.apiKey == "corrected-key" }, error: .unreadable)
+        try await waitUntil { rig.chat.calls.count == 3 }
+        XCTAssertEqual(rig.engine.checkpoint.whiteSelfNotes, "ACCEPTED_PLAN")
+        XCTAssertEqual(rig.engine.referee.position.fen, fen)
+        rig.engine.stop()
+        rig.chat.fulfill(where: { $0.route == .deepseek }, body: #"{"move":"e2e4","taunt":"LATE","self_notes":"LATE_PLAN"}"#)
+        await rig.engine.advance(to: 300)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(rig.engine.boardVersion, 0)
+        XCTAssertEqual(rig.engine.checkpoint.whiteSelfNotes, "ACCEPTED_PLAN")
+        XCTAssertTrue(rig.engine.spokenTaunts.isEmpty)
+        XCTAssertNil(rig.engine.retryAt)
+        try await rig.engine.closeArchive()
+    }
+
+    func testDeepSeekPersonaAndArchiveUseSanitizedFinalAnswer() async throws {
+        var white = PlayerConfiguration(provider: .deepseek).seat(side: .white, keys: rigKeys)
+        var personas = PersonaAssignments.initial
+        white.persona = personas.assign(provider: .deepseek, model: white.model)
+        let rig = try makeRig(whiteSeat: white)
+        try await rig.engine.start(at: 0)
+        try await waitUntil { rig.chat.calls.count == 1 }
+        XCTAssertTrue(rig.engine.speech.first?.text.contains("DeepSeek") == true)
+        let response: [String: Any] = ["choices": [["finish_reason": "stop", "message": [
+            "reasoning_content": "INTERNAL_REASONING", "content": #"{"move":"e2e4","taunt":"Hello deepseek-key","self_notes":"Plan deepseek-key"}"#]]]]
+        let data = try JSONSerialization.data(withJSONObject: response)
+        let text = DeepSeekAPI.redact(try DeepSeekAPI.text(from: data), key: white.apiKey)
+        rig.chat.fulfill(where: { $0.route == .deepseek }, body: text)
+        try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
+        rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "Played.")
+        try await waitUntil { rig.engine.boardVersion == 1 && rig.engine.spokenTaunts.count == 1 }
+        XCTAssertEqual(rig.engine.picture.whiteName, "DeepSeek")
+        let voice = try XCTUnwrap(rig.engine.voice as? ScriptedVoice)
+        XCTAssertEqual(voice.spoken.first { $0.kind == .taunt }?.profile, .persona(try XCTUnwrap(white.persona)))
+        XCTAssertEqual(rig.engine.checkpoint.whiteSelfNotes, "Plan [REDACTED]")
+        rig.engine.stop()
+        try await rig.engine.closeArchive()
+        let pgn = try String(contentsOf: rig.engine.archive.pgnURL)
+        let journal = try String(contentsOf: rig.engine.archive.journalURL)
+        XCTAssertTrue(pgn.contains("DeepSeek"))
+        XCTAssertTrue(pgn.contains("e4"))
+        for value in [pgn, journal, rig.engine.picture.broadcastText] {
+            XCTAssertFalse(value.contains("INTERNAL_REASONING"))
+            XCTAssertFalse(value.contains(white.apiKey))
+        }
+    }
+
     func testCommentaryKeepsTheCompleteLastSentenceBeyondPromptWordLimit() async throws {
         let rig = try makeRig()
         try await rig.engine.start(at: 0)
@@ -169,7 +262,12 @@ final class MatchTests: XCTestCase {
     }
 
     func testCompletedGameAdvicePersistsAndReachesOnlyItsPlayerInNextGame() async throws {
-        let config = PlayerConfiguration(provider: .grok)
+        try await checkAdviceIsolation(provider: .grok)
+        try await checkAdviceIsolation(provider: .deepseek)
+    }
+
+    private func checkAdviceIsolation(provider: NeuralProvider) async throws {
+        let config = PlayerConfiguration(provider: provider)
         let rig = try makeRig(whitePlayer: config, blackPlayer: config)
         var saved = rig.engine.checkpoint
         var memory = GameMemory()
@@ -193,6 +291,8 @@ final class MatchTests: XCTestCase {
             let white = call.user.contains("You played: White")
             XCTAssertEqual(call.gameAdvice, white ? "OLD_WHITE_LESSON" : "OLD_BLACK_LESSON")
             XCTAssertEqual(call.selfNotes, white ? "WHITE_TURN_NOTE" : "BLACK_TURN_NOTE")
+            XCTAssertEqual(call.responseFormat, .text)
+            XCTAssertEqual(call.effort, "high")
             XCTAssertTrue(call.user.contains("Qh4#"))
             XCTAssertTrue(call.user.contains("CHECKMATE · BLACK"))
             XCTAssertTrue(call.user.contains("Final FEN:"))
@@ -231,7 +331,12 @@ final class MatchTests: XCTestCase {
     }
 
     func testFailedOrLateAdviceKeepsPreviousMemoryAndDoesNotBlockSeries() async throws {
-        let rig = try makeRig()
+        try await checkFailedAdvice(provider: .grok)
+        try await checkFailedAdvice(provider: .deepseek)
+    }
+
+    private func checkFailedAdvice(provider: NeuralProvider) async throws {
+        let rig = try makeRig(whitePlayer: .init(provider: provider), blackPlayer: .init(provider: provider))
         var saved = rig.engine.checkpoint
         var memory = GameMemory()
         memory.remember("PREVIOUS_PLAN", for: rig.engine.white)
@@ -245,7 +350,7 @@ final class MatchTests: XCTestCase {
         try await waitUntil { rig.chat.calls.contains { $0.user.contains("Result:") } }
         rig.chat.fulfill(where: { $0.user.contains("Result:") }, body: "Black wins.")
         try await waitUntil { rig.chat.calls.filter { $0.system.contains("Post-game self-review") }.count == 2 }
-        rig.chat.fail(where: { $0.user.contains("You played: White") })
+        rig.chat.fail(where: { $0.user.contains("You played: White") }, error: .unreadable)
         rig.chat.fulfill(where: { $0.user.contains("Result:") }, body: "Black wins.")
         try await waitUntil { rig.engine.finalCards == 1 }
         XCTAssertEqual(rig.engine.gameMemory.advice(for: rig.engine.white), "PREVIOUS_PLAN")
@@ -292,7 +397,7 @@ final class MatchTests: XCTestCase {
             let call = try XCTUnwrap(rig.chat.calls.last)
             XCTAssertEqual(call.url, provider.baseURL.appendingPathComponent(provider == .claude ? "messages" : "chat/completions"))
             XCTAssertEqual(call.model, "selected-commentator-model")
-            XCTAssertEqual(call.apiKey, ["grok-key", "openai-key", "", "claude-key"][NeuralProvider.allCases.firstIndex(of: provider)!])
+            XCTAssertEqual(call.apiKey, expectedKey(provider))
             XCTAssertEqual(call.route, rigKeys.route(for: provider))
             XCTAssertEqual(call.effort, "low")
             XCTAssertNil(call.selfNotes)
@@ -306,8 +411,13 @@ final class MatchTests: XCTestCase {
     }
 
     func testSelfNotesStayWithTheirPlayerAndSurviveRestore() async throws {
+        try await checkNotesIsolation(provider: .grok)
+        try await checkNotesIsolation(provider: .deepseek)
+    }
+
+    private func checkNotesIsolation(provider: NeuralProvider) async throws {
         // Even two seats using the same provider and model must not share notes.
-        let config = PlayerConfiguration(provider: .grok)
+        let config = PlayerConfiguration(provider: provider)
         let rig = try makeRig(whitePlayer: config, blackPlayer: config)
         try await rig.engine.start(at: 0)
         let moves = ["e2e4", "e7e5", "g1f3", "b8c6"]
@@ -337,7 +447,7 @@ final class MatchTests: XCTestCase {
         rig.engine.stop()
         try await rig.engine.closeArchive()
 
-        let restored = try makeRig()
+        let restored = try makeRig(whitePlayer: config, blackPlayer: config)
         restored.engine.restore(saved)
         try await restored.engine.start(at: 0)
         try await waitUntil { restored.chat.calls.count == 1 }
@@ -387,7 +497,9 @@ final class MatchTests: XCTestCase {
                 XCTAssertEqual(opening.apiKey, expectedKey(whiteProvider))
                 XCTAssertEqual(opening.model, "white-selected-model")
                 XCTAssertEqual(opening.route, rigKeys.route(for: whiteProvider))
+                if whiteProvider == .lc0 { XCTAssertEqual(opening.chessPosition, LC0Position(referee: Referee())) }
                 XCTAssertEqual(opening.effort, "high")
+                XCTAssertEqual(opening.responseFormat, .jsonObject)
                 rig.chat.fulfill(where: { $0.system.contains("You are White") }, body: jsonMove("e2e4", "Go."))
                 try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
                 let host = try XCTUnwrap(rig.chat.calls.first { $0.system.contains("already on the board") })
@@ -400,6 +512,10 @@ final class MatchTests: XCTestCase {
                 XCTAssertEqual(reply.apiKey, expectedKey(blackProvider))
                 XCTAssertEqual(reply.model, "black-selected-model")
                 XCTAssertEqual(reply.route, rigKeys.route(for: blackProvider))
+                if blackProvider == .lc0 {
+                    XCTAssertEqual(reply.chessPosition?.moves, ["e2e4"])
+                    XCTAssertTrue(reply.chessPosition?.legalMoves.contains("e7e5") == true)
+                }
                 XCTAssertEqual(rig.engine.picture.whiteName, whiteProvider.rawValue)
                 XCTAssertEqual(rig.engine.picture.blackName, blackProvider.rawValue)
                 XCTAssertEqual(rig.engine.picture.replies.first?.name, whiteProvider.rawValue)
@@ -476,13 +592,13 @@ final class MatchTests: XCTestCase {
         let intro = try XCTUnwrap(rig.engine.speech.first)
         XCTAssertEqual(intro.kind, .intro)
         XCTAssertTrue(intro.text.contains("welcome to Chess Arena"))
-        XCTAssertTrue(intro.text.contains("Playing White: Claude, model claude-opus-5-5, in the manner of Bill Burr."), intro.text)
-        XCTAssertTrue(intro.text.contains("Playing Black: ChatGPT, model chat-latest, in the manner of Ricky Gervais."), intro.text)
+        XCTAssertTrue(intro.text.contains("Playing White: Claude, model claude-opus-5-5."), intro.text)
+        XCTAssertTrue(intro.text.contains("Playing Black: ChatGPT, model chat-latest."), intro.text)
         XCTAssertTrue(rig.engine.archive.journal.contains { $0.kind == "intro" })
         try await waitUntil { rig.chat.calls.count == 1 }
         let request = try XCTUnwrap(rig.chat.calls.first)
         XCTAssertTrue(request.system.contains("Blunt, irritated, no apologies".lowercased()))
-        XCTAssertTrue(request.system.contains("Address it to your opponent"))
+        XCTAssertTrue(request.system.contains("address it to your opponent"))
         XCTAssertTrue(request.system.contains("aimed at your opponent"))
         XCTAssertFalse(request.system.contains("Bill Burr"))
         rig.chat.fulfill(where: { $0.system.contains("Reply with JSON") }, body: jsonMove("e2e4", "Nice opening. Shame about everything after it."))
@@ -492,7 +608,7 @@ final class MatchTests: XCTestCase {
         try await waitUntil { rig.engine.spokenTaunts.count == 1 }
         XCTAssertEqual(rig.engine.picture.tauntSide, .white)
         XCTAssertEqual(rig.engine.picture.taunt, "Nice opening. Shame about everything after it.")
-        XCTAssertEqual(rig.engine.picture.tauntPersona, "Bill Burr")
+        XCTAssertNil(rig.engine.picture.tauntPersona)
         let voice = try XCTUnwrap(rig.engine.voice as? ScriptedVoice)
         XCTAssertEqual(voice.spoken.first?.profile, .host, "the greeting is the host's")
         XCTAssertEqual(voice.spoken.first { $0.kind == .move }?.profile, .host)
@@ -836,7 +952,7 @@ final class MatchTests: XCTestCase {
             rig.chat.fulfill(where: { $0.system.contains("Reply with JSON") }, body: jsonMove(move, ""))
             try await waitUntil { rig.chat.calls.filter { $0.system.contains("already on the board") }.count == index + 1 }
             let host = try XCTUnwrap(rig.chat.calls.last)
-            XCTAssertTrue(host.system.contains("Commentary style: ZADORNOV."))
+            XCTAssertTrue(host.system.contains("conversational observational humor"))
             XCTAssertFalse(host.system.contains("House")); XCTAssertFalse(host.system.contains("Carlin"))
             if index > 0 { XCTAssertTrue(host.user.contains("Comment number \(index - 1)")) }
             rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "Comment number \(index)")
@@ -851,10 +967,10 @@ final class MatchTests: XCTestCase {
         await restored.engine.advance(to: 20)
         try await waitUntil { restored.chat.calls.contains { $0.system.contains("Do not name a move") } }
         let waiting = try XCTUnwrap(restored.chat.calls.first { $0.system.contains("Do not name a move") })
-        XCTAssertTrue(waiting.system.contains("Commentary style: ZADORNOV."))
+        XCTAssertTrue(waiting.system.contains("conversational observational humor"))
         restored.chat.fail(where: { $0.system.contains("Do not name a move") }, error: .transport)
         try await waitUntil { restored.engine.speech.contains { $0.kind == .wait } }
-        let waitingLines = ["He set out to make a move and formed a one-pawn board of directors.", "Such a small board, such a large place to get lost in your plans.", "He wanted a quick decision. Now he is choosing the quickest way to choose."]
+        let waitingLines = (0..<8).map { CommentaryStyle.zadornov.fallback(for: .waiting, language: .english, variation: $0) }
         XCTAssertTrue(waitingLines.contains(restored.engine.speech.last?.text ?? ""), restored.engine.speech.last?.text ?? "")
         XCTAssertFalse(restored.engine.speech.contains { $0.kind == .intro }, "a restored game is not greeted again")
         restored.engine.stop()
@@ -1024,6 +1140,52 @@ final class MatchTests: XCTestCase {
         try await rig.engine.closeArchive()
     }
 
+    func testOrdinaryTauntIsSuppressedAndRejectedAnswerDoesNotRedraw() async throws {
+        var white = Seat.defaultWhite(apiKey: "k"); white.persona = .burr
+        let rig = try makeRig(whiteSeat: white)
+        var draws = 0
+        rig.engine.tauntDraw = { draws += 1; return 20 }
+        try await rig.engine.start(at: 0)
+        try await waitUntil { rig.chat.calls.count == 1 }
+        XCTAssertTrue(rig.chat.calls[0].user.contains("An ordinary move requires silence"))
+        rig.chat.fulfill(where: { $0.system.contains("You are White") }, body: jsonMove("e2e5", "Rejected joke."))
+        try await waitUntil { rig.chat.calls.count == 2 }
+        XCTAssertEqual(draws, 1)
+        rig.chat.fulfill(where: { $0.system.contains("You are White") }, body: jsonMove("e2e4", "Unwanted joke."))
+        try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
+        rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "The pawn takes the centre.")
+        try await waitUntil { rig.engine.boardVersion == 1 }
+        XCTAssertTrue(rig.engine.picture.taunt.isEmpty)
+        XCTAssertTrue(rig.engine.referee.accepted[0].taunt.isEmpty)
+        XCTAssertFalse(rig.engine.picture.replies.contains { $0.text.contains("Unwanted joke") || $0.text.contains("Rejected joke") })
+        XCTAssertFalse(rig.engine.archive.journal.contains { $0.kind == "taunt" })
+        XCTAssertTrue(rig.engine.spokenTaunts.isEmpty)
+        XCTAssertEqual(draws, 2, "next position gets a new draw")
+        rig.engine.stop()
+        try await rig.engine.closeArchive()
+    }
+
+    func testMateTauntBypassesLotteryAndPrecedesFinalCommentary() async throws {
+        var black = Seat.defaultBlack(apiKey: "k"); black.persona = .gervais
+        let rig = try makeRig(blackSeat: black)
+        var saved = rig.engine.checkpoint
+        for move in ["f2f3", "e7e5", "g2g4"] { _ = saved.referee.submit(rawMove: move, taunt: "") }
+        rig.engine.restore(saved)
+        rig.engine.tauntDraw = { 99 }
+        try await rig.engine.start(at: 0)
+        try await waitUntil { rig.chat.calls.count == 1 }
+        rig.chat.fulfill(where: { $0.system.contains("You are Black") }, body: jsonMove("d8h4", "Your king forgot the exit."))
+        try await waitUntil { rig.chat.calls.contains { $0.user.contains("Result:") } }
+        rig.chat.fulfill(where: { $0.user.contains("Result:") }, body: "Black wins by checkmate.")
+        try await waitUntil { rig.engine.speech.contains { $0.kind == .final } }
+        XCTAssertEqual(rig.engine.spokenTaunts.last?.text, "Your king forgot the exit.")
+        XCTAssertEqual(rig.engine.referee.end, .checkmate(winner: .black))
+        let voice = try XCTUnwrap(rig.engine.voice as? ScriptedVoice)
+        XCTAssertEqual(voice.spoken.map(\.kind), [.taunt, .final])
+        rig.engine.stop()
+        try await rig.engine.closeArchive()
+    }
+
     private func makeRig(
         whitePlayer: PlayerConfiguration? = nil, blackPlayer: PlayerConfiguration? = nil,
         hostPlayer: PlayerConfiguration? = nil, gameMemory: GameMemory = GameMemory(), whiteSeat: Seat? = nil, blackSeat: Seat? = nil
@@ -1049,6 +1211,7 @@ final class MatchTests: XCTestCase {
             host: host,
             gameMemory: gameMemory
         )
+        engine.tauntDraw = { 0 } // Existing speech-order tests always exercise an allowed taunt.
         return Rig(engine: engine, chat: chat)
     }
 
@@ -1069,14 +1232,15 @@ private struct Rig {
     var chat: ScriptedChat
 }
 
-private let rigKeys = ProviderKeys(grok: "grok-key", chatGPT: "openai-key", anthropic: "claude-key", claudeAccess: .apiKey)
+private let rigKeys = ProviderKeys(grok: "grok-key", chatGPT: "openai-key", anthropic: "claude-key", claudeAccess: .apiKey, deepseek: "deepseek-key")
 
 private func expectedKey(_ provider: NeuralProvider) -> String {
     switch provider {
     case .grok: return "grok-key"
     case .chatGPT: return "openai-key"
-    case .gemini: return ""
+    case .gemini, .lc0: return ""
     case .claude: return "claude-key"
+    case .deepseek: return "deepseek-key"
     }
 }
 
