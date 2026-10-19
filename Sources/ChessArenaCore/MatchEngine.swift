@@ -13,6 +13,7 @@ public final class MatchEngine {
     public var animationDuration: TimeInterval = 0
     public var language: BroadcastLanguage = .english
     public var modelLog: ModelLog?
+    private var requestDiagnostic: MatchDiagnostic?
     private var playerLogID: UUID?
     public var requestTimeout: TimeInterval = RequestTimeouts.player
     public var hostTimeout: TimeInterval = RequestTimeouts.host
@@ -48,7 +49,8 @@ public final class MatchEngine {
     private var thinkGeneration = 0
     private var waitEpoch = 0
     private var thinkStarted: TimeInterval = 0
-    private var thinkDeadline: TimeInterval = 0
+    private var requestTiming: RequestTiming?
+    var requestNow: @Sendable () -> TimeInterval = { RequestTiming.monotonicNow() }
     private var waitSpoken = false
     private var lastRejection: String?
     private var whiteSelfNotes: String?
@@ -98,10 +100,9 @@ public final class MatchEngine {
         referee = saved.referee
         clock = saved.elapsed
         picture = saved.picture
+        if referee.end == nil { picture.banner = nil }
         picture.tauntPersona = nil
-        picture.thinkingSide = nil
-        picture.thinkingSelfNotes = nil
-        picture.pausedPlayer = nil
+        picture.clearPendingRequest(language: language)
         replies = saved.picture.replies
         hostCommentaryCount = saved.journal.filter { $0.kind != "taunt" }.count
         lastRejection = saved.lastRejection
@@ -110,7 +111,7 @@ public final class MatchEngine {
         gameMemory = saved.gameMemory ?? gameMemory
         moveRequestCount = saved.requestCount
         boardVersion = referee.accepted.count
-        archive.restore(moves: referee.accepted, journal: saved.journal, end: referee.end)
+        archive.restore(moves: referee.accepted, journal: saved.journal, end: referee.end, position: referee.position)
         scene.resetBoard(position: referee.position)
     }
 
@@ -128,6 +129,7 @@ public final class MatchEngine {
         clock = time
         archiveOrigin = time
         try archive.open()
+        try archive.writeParticipants(white: white, black: black)
         archive.append(pixelBuffer: FrameBuffer.make())
         scene.resetBoard(position: referee.position)
         if let end = referee.end {
@@ -162,7 +164,7 @@ public final class MatchEngine {
     public func advance(to time: TimeInterval) async {
         guard !stopped else { return }
         clock = time
-        if let retryAt, time >= retryAt { resume() }
+        if let retryAt, time >= retryAt { resume(resetAttempts: false) }
         if let until = animatingUntil, time >= until {
             animatingUntil = nil
             scene.finishAnimation()
@@ -175,12 +177,14 @@ public final class MatchEngine {
         refreshPicture()
     }
 
-    public func resume() {
+    public func resume(resetAttempts: Bool = true) {
         guard !stopped, paused, referee.end == nil else { return }
+        if resetAttempts { retryCount = 0 }
         paused = false
         retryAt = nil
         pauseReason = nil
         phase = "thinking"
+        picture.line = language.text("Ожидаем ответ модели.", "Waiting for the model response.")
         beginThink()
     }
 
@@ -191,7 +195,8 @@ public final class MatchEngine {
     }
 
     public func repeatPlayerRequest() {
-        guard canRepeatPlayerRequest, let request = lastPlayerRequest else { return }
+        guard canRepeatPlayerRequest else { return }
+        let wasPaused = paused
         // Invalidate the old attempt before cancelling it: a late reply must not move a piece.
         thinkGeneration += 1
         waitEpoch += 1
@@ -202,10 +207,12 @@ public final class MatchEngine {
         pauseReason = nil
         retryAt = nil
         retryCount = 0
-        beginThink(repeating: request.call)
+        if wasPaused { picture.line = language.text("Ожидаем ответ модели.", "Waiting for the model response.") }
+        beginThink()
     }
 
     public func stop() {
+        emitDiagnostic("stopped")
         flushAiringAudio()
         airingAudio = nil
         stopped = true
@@ -241,21 +248,29 @@ public final class MatchEngine {
     }
 
     public func closeArchive() async throws {
-        try await archive.finish(end: referee.end)
+        try await archive.finish(end: referee.end, position: referee.position)
     }
 
-    private func beginThink(repeating request: ChatCall? = nil) {
+    private func beginThink() {
         guard !stopped, thinkTask == nil, referee.end == nil, !paused, !finalActive else { return }
         thinkGeneration += 1
         let generation = thinkGeneration
         thinkStarted = clock
-        thinkDeadline = clock + requestTimeout
         waitSpoken = false
         phase = "thinking"
         scene.setThinking(referee.position.sideToMove)
-        let call = request ?? playerCall()
+        let call = playerCall()
+        let timing = RequestTiming(seconds: min(requestTimeout, transport.requestTimeout(for: call) ?? requestTimeout), now: requestNow)
+        requestTiming = timing
         lastPlayerRequest = (call, boardVersion, referee.position.sideToMove)
         moveRequestCount += 1
+        requestDiagnostic = MatchDiagnostic(roundID: archive.roundID, requestID: UUID(), event: "request",
+            provider: DeepSeekAPI.redact(referee.position.sideToMove == .white ? white.name : black.name, key: call.apiKey), model: DeepSeekAPI.redact(call.model, key: call.apiKey), side: referee.position.sideToMove,
+            ply: boardVersion, fen: referee.position.fen, attempt: retryCount + 1,
+            budget: call.route == .deepseek ? (call.maxOutputTokens ?? DeepSeekAPI.maxTokens) : nil)
+        requestDiagnostic?.logicalTurnID = "\(archive.roundID.uuidString):\(boardVersion)"
+        requestDiagnostic?.timeoutSeconds = timing.budget
+        emitDiagnostic("request")
         thinkTask = Task { [weak self] in
             guard let self else { return }
             defer { self.turnTasks.removeValue(forKey: generation) }
@@ -263,15 +278,18 @@ public final class MatchEngine {
             do {
                 let side = self.referee.position.sideToMove
                 let player = side == .white ? self.white.name : self.black.name
-                let text = try await self.complete(call, context: "Ход \(side == .white ? "белых" : "чёрных") · \(player)", timeout: self.requestTimeout, player: true)
+                let text = try await ResponseTrace.$receive.withValue({ [weak self] metadata in
+                    await self?.recordResponse(metadata, generation: generation)
+                }) {
+                    try await self.complete(call, context: "Ход \(side == .white ? "белых" : "чёрных") · \(player)", timeout: timing.budget, player: true, timing: timing)
+                }
                 guard !Task.isCancelled, !self.stopped else { return }
+                guard generation == self.thinkGeneration else { return }
+                self.emitDiagnostic("response_received")
                 self.onPlayerWaiting?()
                 await self.ingest(text, generation: generation)
             } catch is CancellationError {
                 return
-            } catch let error as ChatError where error == .unreadable {
-                self.onPlayerWaiting?()
-                await self.ingest("", generation: generation)
             } catch {
                 self.onPlayerWaiting?()
                 await self.stall(generation: generation, error: error as? ChatError ?? .transport)
@@ -285,15 +303,19 @@ public final class MatchEngine {
         guard !stopped, generation == thinkGeneration else { return }
         waitEpoch += 1
         phase = "preparing"
+        refreshPicture()
         let side = referee.position.sideToMove
         let seat = side == .white ? white : black
-        let intent = ChatParser.moveIntent(from: text)
+        guard let intent = ChatParser.moveIntent(from: text) else {
+            await stall(generation: generation, error: .response(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .empty : .schema))
+            return
+        }
         // Validate off-screen. The saved/live board advances only when its audio is ready to air.
         var candidate = referee
-        let rawMove = intent?.move ?? text
+        let rawMove = intent.move
         let move = referee.position.parseUCI(rawMove)
         let important = move.map { referee.position.isLegal($0) && BanterPolicy.isImportant($0, in: referee.position) } ?? false
-        let proposed = SpokenText.clean(intent?.taunt ?? "")
+        let proposed = SpokenText.clean(intent.taunt)
         let recent = archive.journal.suffix(12).map(\.text)
         let allowed = (tauntDecision?.allowed ?? false) || important
         let taunt = allowed && !BanterPolicy.repeats(proposed, recent: recent) ? proposed : ""
@@ -324,7 +346,7 @@ public final class MatchEngine {
             thinkTask = nil
             referee = candidate
             noteReply(side: side, name: seat.name, text: text, taunt: move.taunt)
-            if let notes = intent?.selfNotes {
+            if let notes = intent.selfNotes {
                 if side == .white { whiteSelfNotes = notes } else { blackSelfNotes = notes }
             }
             lastRejection = nil; retryCount = 0
@@ -334,6 +356,7 @@ public final class MatchEngine {
             picture.tauntSide = side
             picture.tauntPersona = nil
             archive.record(move: move, clock: clock, includeTaunt: taunt == nil)
+            emitDiagnostic("accepted", reason: move.move.uci)
             let presentMove = { [self] in
                 scene.animate(move: move.move, positionAfter: candidate.position, side: side, duration: animationDuration)
                 if animationDuration > 0 { animatingUntil = clock + animationDuration }
@@ -361,20 +384,31 @@ public final class MatchEngine {
             noteReply(side: side, name: seat.name, text: text, taunt: "")
             if let playerLogID { modelLog?.rejectMove(playerLogID, reason: reason, secrets: [seat.apiKey]) }
             lastRejection = reason
-            beginThink()
-        case .resigned(let end):
-            thinkTask = nil
-            referee = candidate
-            if let playerLogID {
-                modelLog?.rejectMove(playerLogID, reason: "Три недопустимых ответа подряд; засчитано поражение.", secrets: [seat.apiKey])
-            }
-            guard await presentationGate.acquire() else { return }
-            defer { presentationGate.release() }
-            guard !stopped, !Task.isCancelled else { return }
-            await finishGame(end)
+            await stall(generation: generation, error: .response(.illegalMove))
         case .ignored:
             thinkTask = nil
         }
+    }
+
+    private func recordResponse(_ metadata: ResponseMetadata, generation: Int) {
+        guard generation == thinkGeneration, !stopped, !Task.isCancelled else { return }
+        requestDiagnostic?.response = metadata
+        if let playerLogID { modelLog?.metadata(playerLogID, response: metadata) }
+        emitDiagnostic("response")
+    }
+
+    private func emitDiagnostic(_ event: String, reason: String? = nil) {
+        guard var entry = requestDiagnostic else { return }
+        entry.event = event
+        entry.reason = reason
+        if ["accepted", "finished", "stopped"].contains(event) {
+            entry.fen = referee.position.fen; entry.ply = boardVersion
+        }
+        let now = Date()
+        entry.duration = requestTiming?.elapsed ?? max(0, now.timeIntervalSince(entry.timestamp))
+        entry.timestamp = now
+        entry.retryAt = retryAt
+        archive.record(diagnostic: entry)
     }
 
     private func validTurn(_ generation: Int) -> Bool {
@@ -403,16 +437,35 @@ public final class MatchEngine {
         scene.setThinking(nil)
         let side = referee.position.sideToMove
         let seat = side == .white ? white : black
-        if error.pausesWithoutRetry {
+        retryCount += 1
+        if let playerLogID { modelLog?.rejectMove(playerLogID, reason: error.userMessage) }
+        if case .response = error { lastRejection = error.userMessage }
+        if error == .unreadable { lastRejection = error.userMessage }
+        requestDiagnostic?.timeoutSource = error.timeoutSource(deadlineExpired: requestTiming?.remaining == 0)
+        if error.pausesWithoutRetry || retryCount >= 3 {
             retryAt = nil
-            pauseReason = "\(seat.name): \(error.userMessage)"
+            requestDiagnostic?.retryDecision = error.pausesWithoutRetry ? "user_action_required" : "attempts_exhausted"
+            emitDiagnostic("paused", reason: error.diagnosticCode)
+            let exhausted = retryCount >= 3 && !error.pausesWithoutRetry
+                ? language.text(" Три попытки исчерпаны. Нажмите «Повторить запрос».", " Three attempts exhausted. Repeat the request to continue.") : ""
+            pauseReason = "\(seat.name): \(error.userMessage)" + exhausted
             picture.line = pauseReason ?? ""
             refreshPicture()
             return
         }
-        retryCount += 1
+        // At most two corrective replies; automatic retries retain the batch counter.
+        if error == .unreadable || { if case .response = error { return true }; return false }() {
+            paused = false
+            pauseReason = nil
+            requestDiagnostic?.retryDecision = "corrective_retry"
+            emitDiagnostic("retry", reason: error.diagnosticCode)
+            beginThink()
+            return
+        }
         let delay = min(60.0, 3 * pow(2, Double(min(retryCount - 1, 5))))
         retryAt = clock + delay
+        requestDiagnostic?.retryDecision = "scheduled"
+        emitDiagnostic("retry", reason: error.diagnosticCode)
         pauseReason = "\(seat.name): \(error.userMessage) " + language.text("Автоповтор через \(Int(delay)) с.", "Retrying in \(Int(delay)) s.")
         picture.line = language.text("\(seat.name): повторяем запрос хода…", "\(seat.name): retrying the move request…")
         refreshPicture()
@@ -443,7 +496,7 @@ public final class MatchEngine {
     private func handle(_ cue: ChronicleDirector.Cue) async {
         switch cue {
         case .startFinal:
-            guard !sawFinal else { return }
+            guard !sawFinal, referee.end != nil else { return }
             sawFinal = true
             finalCards += 1
             phase = "final"
@@ -459,19 +512,16 @@ public final class MatchEngine {
     }
 
     private func finishGame(_ end: GameEnd, preparedSummary: PreparedSpeech? = nil, preparedTaunt: PreparedSpeech? = nil, onStart: @escaping @MainActor () -> Void = {}) async {
+        guard referee.position.gameEnd == end else { return }
         thinkTask?.cancel()
         thinkTask = nil
-        archive.markResult(end)
+        archive.markResult(end, position: referee.position)
+        emitDiagnostic("finished", reason: end == .stalemate ? "stalemate" : "checkmate")
         onGameEnded?(end)
         phase = "summary"
         refreshPicture(line: language.text("Комментатор подводит итоги партии…", "The commentator is preparing the verdict…"))
         let title = language.result(end, white: white.name, black: black.name)
-        let reviewResult: String
-        if case .resignation = end {
-            reviewResult = title + " · " + end.title + " (three consecutive invalid move replies)"
-        } else {
-            reviewResult = title + " · " + end.title
-        }
+        let reviewResult = title + " · " + end.title
         async let whiteAdvice: Void = prepareNextGame(for: white, result: reviewResult)
         async let blackAdvice: Void = prepareNextGame(for: black, result: reviewResult)
         let prepared: PreparedSpeech
@@ -504,14 +554,15 @@ public final class MatchEngine {
         guard !stopped, !Task.isCancelled else { return }
         let prompt = Prompts.nextGameAdvice(side: seat.side, result: result,
                                            fen: referee.position.fen, moves: referee.accepted.map(\.san))
-        let call = ChatCall(url: seat.completionsURL, apiKey: seat.apiKey, model: seat.model,
+        var call = ChatCall(url: seat.completionsURL, apiKey: seat.apiKey, model: seat.model,
                             system: language.prompt(prompt.system), user: prompt.user,
                             selfNotes: seat.side == .white ? whiteSelfNotes : blackSelfNotes,
                             route: seat.route, gameAdvice: gameMemory.advice(for: seat), effort: "high")
+        call.maxOutputTokens = seat.maxOutputTokens
         do {
             let text = try await complete(call, context: "План на следующую партию · \(seat.side == .white ? "белые" : "чёрные") · \(seat.name)", timeout: learningTimeout)
             guard !stopped, !Task.isCancelled else { return }
-            gameMemory.remember(text, for: seat, secrets: [white.apiKey, black.apiKey, host.apiKey])
+            gameMemory.remember(text, for: seat, secrets: [white.apiKey, black.apiKey, host.apiKey], sourceRoundID: archive.roundID)
             refreshPicture()
         } catch {
             // The model log records the error; retain the last successful plan and let the series continue.
@@ -582,12 +633,12 @@ public final class MatchEngine {
         return spoken
     }
 
-    private func complete(_ call: ChatCall, context: String, timeout: TimeInterval, player: Bool = false) async throws -> String {
+    private func complete(_ call: ChatCall, context: String, timeout: TimeInterval, player: Bool = false, timing: RequestTiming? = nil) async throws -> String {
         let log = modelLog
         let id = log?.begin(call, context: context, endpoint: transport.requestURL(for: call))
         if player { playerLogID = id }
         do {
-            let text = try await RequestDeadline.run(seconds: timeout) { [transport] in
+            let text = try await RequestDeadline.run(timing: timing ?? RequestTiming(seconds: min(timeout, transport.requestTimeout(for: call) ?? timeout))) { [transport] in
                 try await transport.complete(call)
             }
             if let id { log?.succeed(id, response: text, secrets: [call.apiKey]) }
@@ -619,6 +670,7 @@ public final class MatchEngine {
                         system: language.prompt(prompt.system), user: prompt.user,
                         selfNotes: side == .white ? whiteSelfNotes : blackSelfNotes, route: seat.route,
                         gameAdvice: gameMemory.advice(for: seat), effort: "high", responseFormat: .jsonObject)
+        call.maxOutputTokens = seat.maxOutputTokens
         if seat.route == .lc0 { call.chessPosition = LC0Position(referee: referee) }
         return call
     }
@@ -649,11 +701,21 @@ public final class MatchEngine {
     }
 
     private func refreshPicture(line: String? = nil, banner: String? = nil) {
-        let thinkingSide = (phase == "thinking" || phase == "preparing") && thinkTask != nil ? referee.position.sideToMove : nil
+        let thinkingSide = phase == "thinking" && thinkTask != nil ? referee.position.sideToMove : nil
         // Whole seconds so the checkpoint changes once a second, not once a frame.
-        let secondsLeft = thinkingSide == nil ? nil : max(0, Int((thinkDeadline - clock).rounded(.up)))
+        let secondsLeft = thinkingSide == nil ? nil : Int(ceil(requestTiming?.remaining ?? 0))
         // Broadcast only this game's turn note; cross-game advice stays in the model request.
         let notes = thinkingSide == nil ? nil : lastPlayerRequest?.call.selfNotes
+        let state: RequestStatus?
+        if paused {
+            state = RequestStatus(mode: retryAt == nil ? .manualPause : .retryScheduled,
+                attempt: retryAt == nil ? retryCount : retryCount + 1,
+                secondsLeft: retryAt.map { max(0, Int(ceil($0 - clock))) }, reason: pauseReason)
+        } else if thinkingSide != nil {
+            state = RequestStatus(mode: .waiting, attempt: retryCount + 1, secondsLeft: secondsLeft)
+        } else if phase == "preparing", thinkTask != nil {
+            state = RequestStatus(mode: .preparing, attempt: retryCount + 1)
+        } else { state = nil }
         picture = BroadcastPicture(
             whiteName: white.name,
             blackName: black.name,
@@ -667,7 +729,8 @@ public final class MatchEngine {
             thinkingSelfNotes: notes.map { ModelLog.sanitize($0, secrets: [white.apiKey, black.apiKey, host.apiKey]) },
             tauntSide: picture.tauntSide,
             tauntPersona: picture.tauntPersona,
-            thinkSecondsLeft: secondsLeft
+            thinkSecondsLeft: secondsLeft,
+            requestStatus: state
         )
         let saved = checkpoint
         if saved != lastCheckpoint {

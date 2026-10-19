@@ -19,6 +19,37 @@ public struct ModelReply: Equatable, Sendable, Identifiable, Codable {
     }
 }
 
+public struct RequestStatus: Equatable, Sendable, Codable {
+    public enum Mode: String, Codable, Sendable { case waiting, retryScheduled, manualPause, preparing }
+    public var mode: Mode
+    public var attempt: Int
+    public var secondsLeft: Int?
+    public var reason: String?
+    public init(mode: Mode, attempt: Int, secondsLeft: Int? = nil, reason: String? = nil) {
+        self.mode = mode; self.attempt = attempt; self.secondsLeft = secondsLeft; self.reason = reason
+    }
+    public func title(_ language: BroadcastLanguage) -> String {
+        switch mode {
+        case .waiting: return language.text("ОЖИДАНИЕ ОТВЕТА", "WAITING FOR RESPONSE")
+        case .retryScheduled: return language.text("АВТОПОВТОР", "AUTOMATIC RETRY")
+        case .manualPause: return language.text("ПАУЗА", "PAUSED")
+        case .preparing: return language.text("ХОД ПОЛУЧЕН", "MOVE RECEIVED")
+        }
+    }
+    public func detail(_ language: BroadcastLanguage) -> String {
+        switch mode {
+        case .waiting:
+            return language.text("Ожидание ответа · попытка \(attempt)/3", "Waiting for response · attempt \(attempt)/3")
+        case .retryScheduled:
+            return language.text("Автоповтор через \(secondsLeft ?? 0) с · попытка \(attempt)/3", "Retry in \(secondsLeft ?? 0) s · attempt \(attempt)/3")
+        case .manualPause:
+            return reason ?? language.text("Ожидается ручное продолжение.", "Waiting for manual resume.")
+        case .preparing:
+            return language.text("Готовим озвучку хода…", "Preparing move audio…")
+        }
+    }
+}
+
 public struct BroadcastPicture: Equatable, Sendable, Codable {
     public var whiteName: String
     public var blackName: String
@@ -35,6 +66,7 @@ public struct BroadcastPicture: Equatable, Sendable, Codable {
     public var tauntPersona: String? = nil
     /// Whole seconds left before the pending move request times out; nil when nobody is thinking.
     public var thinkSecondsLeft: Int? = nil
+    public var requestStatus: RequestStatus? = nil
 
     public init(
         whiteName: String,
@@ -49,7 +81,8 @@ public struct BroadcastPicture: Equatable, Sendable, Codable {
         thinkingSelfNotes: String? = nil,
         tauntSide: Side? = nil,
         tauntPersona: String? = nil,
-        thinkSecondsLeft: Int? = nil
+        thinkSecondsLeft: Int? = nil,
+        requestStatus: RequestStatus? = nil
     ) {
         self.whiteName = whiteName
         self.blackName = blackName
@@ -64,6 +97,19 @@ public struct BroadcastPicture: Equatable, Sendable, Codable {
         self.tauntSide = tauntSide
         self.tauntPersona = tauntPersona
         self.thinkSecondsLeft = thinkSecondsLeft
+        self.requestStatus = requestStatus
+    }
+
+    /// Pending processes/timers are never restored from a saved picture.
+    public mutating func clearPendingRequest(language: BroadcastLanguage) {
+        if thinkingSide != nil || pausedPlayer != nil || requestStatus != nil {
+            line = language.text("Партия сохранена. Продолжите её, чтобы запросить ход.", "Game saved. Resume it to request a move.")
+        }
+        thinkingSide = nil
+        thinkingSelfNotes = nil
+        pausedPlayer = nil
+        requestStatus = nil
+        thinkSecondsLeft = nil
     }
 
     public static let empty = BroadcastPicture(

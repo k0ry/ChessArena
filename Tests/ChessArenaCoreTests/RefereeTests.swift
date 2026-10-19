@@ -2,6 +2,22 @@ import XCTest
 @testable import ChessArenaCore
 
 final class RefereeTests: XCTestCase {
+    func testHistoricalFalseLossPositionsRemainPlayableAfterHundredFailures() {
+        for (fen, count) in [
+            ("r2q1rk1/1p1nbppp/p2pbn2/4p3/4P3/1NN1BP2/PPPQ2PP/2KR1B1R w - - 5 11", 40),
+            ("r2q1rk1/3nbppp/p2pb3/4p1Pn/1p2P3/1N2BP2/PPPQN2P/2KR1B1R w - - 2 14", 36),
+            ("r1b1k2r/1pqnbppp/p2ppn2/6B1/3NPP2/2N2Q2/PPP3PP/2KR1B1R w kq - 5 10", 43)
+        ] {
+            var referee = Referee(position: Position.position(fen: fen)!)
+            XCTAssertEqual(referee.legalUCI.count, count)
+            for index in 1...100 {
+                guard case .rejected = referee.submit(rawMove: index.isMultiple(of: 2) ? "" : "a1a8", taunt: "") else { return XCTFail("Unexpected result") }
+                XCTAssertNil(referee.end)
+                XCTAssertEqual(referee.position.fen, fen)
+            }
+        }
+    }
+
     func testInitialPositionHasTwentyLegalMovesAndRoundTripsFEN() {
         let position = Position.standard()
         XCTAssertEqual(position.legalMoves().count, 20)
@@ -74,14 +90,14 @@ final class RefereeTests: XCTestCase {
         XCTAssertEqual(position.san(castle), "O-O")
     }
 
-    func testThirdFailureResignsAndMateOrStalemateEndsWithoutAnotherRequest() {
+    func testErrorsNeverEndGameAndMateOrStalemateEndsWithoutAnotherRequest() {
         var referee = Referee()
-        XCTAssertEqual(referee.submit(rawMove: "e2e5", taunt: ""), .rejected(reason: "Illegal or unreadable move e2e5.", attempt: 1))
-        XCTAssertEqual(referee.submit(rawMove: "nonsense", taunt: ""), .rejected(reason: "Illegal or unreadable move nonsense.", attempt: 2))
-        let third = referee.submit(rawMove: "e2e5", taunt: "")
-        XCTAssertEqual(third, .resigned(.resignation(loser: .white)))
-        XCTAssertEqual(referee.position.fen, Position.standard().fen)
-        XCTAssertEqual(referee.submit(rawMove: "e2e4", taunt: ""), .ignored)
+        for attempt in 1...100 {
+            XCTAssertEqual(referee.submit(rawMove: "", taunt: ""), .rejected(reason: "Illegal or unreadable move .", attempt: attempt))
+            XCTAssertNil(referee.end)
+            XCTAssertEqual(referee.position, .standard())
+        }
+        guard case .accepted = referee.submit(rawMove: "e2e4", taunt: "") else { return XCTFail("Must recover") }
 
         var mate = Referee()
         for uci in ["f2f3", "e7e5", "g2g4", "d8h4"] {

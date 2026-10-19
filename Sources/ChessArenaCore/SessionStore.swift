@@ -78,10 +78,9 @@ public final class SessionStore {
         let data = try Data(contentsOf: url)
         let version = try JSONDecoder().decode(Version.self, from: data)
         guard version.schemaVersion == 1 else { throw SessionStoreError.unsupportedVersion }
-        let state = try JSONDecoder().decode(SavedSession.self, from: data)
+        var state = try JSONDecoder().decode(SavedSession.self, from: data)
         guard state.camera.yaw.isFinite, state.camera.pitch.isFinite, state.camera.distance.isFinite, state.camera.roll?.isFinite != false,
               !state.series.running || (state.game != nil && state.series.roundID != nil),
-              state.series.result == nil || state.series.result == state.game?.referee.end,
               state.series.restartAt?.isFinite != false else { throw SessionStoreError.invalidState }
         if let game = state.game {
             guard game.elapsed.isFinite, game.elapsed >= 0, game.requestCount >= 0,
@@ -90,6 +89,23 @@ public final class SessionStore {
                       [move.move.from, move.move.to].allSatisfy { (0..<8).contains($0.file) && (0..<8).contains($0.rank) }
                   }) else { throw SessionStoreError.invalidState }
         }
+        if var game = state.game {
+            let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let rawGame = raw?["game"] as? [String: Any]
+            let rawReferee = rawGame?["referee"] as? [String: Any]
+            let legacyEnd = rawReferee?["end"] != nil && !(rawReferee?["end"] is NSNull)
+            let recovered = state.series.recoverLegacyResult(position: game.referee.position)
+            if recovered || (legacyEnd && game.referee.end == nil) {
+                let backup = url.appendingPathExtension("before-terminal-only.json")
+                if !FileManager.default.fileExists(atPath: backup.path) { try data.write(to: backup, options: .withoutOverwriting) }
+                state.series.stop()
+                game.picture.banner = nil
+                game.picture.line = "Партия восстановлена: техническая ошибка не является результатом. Продолжите с сохранённой позиции."
+                game.lastRejection = nil
+                state.game = game
+                try save(state)
+            }
+        } else if state.series.result != nil { throw SessionStoreError.invalidState }
         return state
     }
 

@@ -126,7 +126,7 @@ enum ArenaMain {
         }
         if let index = CommandLine.arguments.firstIndex(of: "--preview-result"), CommandLine.arguments.count > index + 1 {
             var score = SeriesScore()
-            score.record(.checkmate(winner: .black))
+            score.record(.checkmate(winner: .black), position: Position.position(fen: "8/8/8/8/8/5k2/6q1/7K w - - 0 1")!)
             let content = ResultSplash(title: "ChatGPT ПОБЕЖДАЕТ", whiteName: "Grok", blackName: "ChatGPT",
                                        score: score, seconds: 24, language: .russian, winner: .black)
                 .overlay(alignment: .top) {

@@ -86,6 +86,8 @@ public struct PlayerConfiguration: Equatable, Sendable, Codable {
         }
     }
     public var model: String
+    /// Optional so older sessions keep the original 16,384-token budget.
+    public var maxOutputTokens: Int? = nil
 
     public init(provider: NeuralProvider) {
         self.provider = provider
@@ -93,9 +95,11 @@ public struct PlayerConfiguration: Equatable, Sendable, Codable {
     }
 
     public func seat(side: Side, keys: ProviderKeys) -> Seat {
-        Seat(name: provider.rawValue, baseURL: keys.baseURL(for: provider),
+        var seat = Seat(name: provider.rawValue, baseURL: keys.baseURL(for: provider),
              model: model.trimmingCharacters(in: .whitespacesAndNewlines),
              apiKey: keys.key(for: provider), side: side, route: keys.route(for: provider))
+        seat.maxOutputTokens = maxOutputTokens
+        return seat
     }
 
     public func seat(side: Side, grokKey: String, chatKey: String) -> Seat {

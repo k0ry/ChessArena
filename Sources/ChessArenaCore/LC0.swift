@@ -1,7 +1,7 @@
 import Combine
 import Foundation
 
-public enum LC0Error: Equatable, Sendable {
+public enum LC0Error: String, Equatable, Sendable {
     case missing, weights, execution, timeout, protocolError, invalidMove
 
     public var userMessage: String {
@@ -83,6 +83,10 @@ public final class LC0Transport: ChatTransport, @unchecked Sendable {
         configuration = settings; timeoutOverride = timeout
     }
 
+    public func requestTimeout(for call: ChatCall) -> TimeInterval? {
+        timeoutOverride ?? lock.withLock { TimeInterval(configuration.moveSeconds + 90) }
+    }
+
     public func configure(_ settings: LC0Settings) { lock.withLock { configuration = settings } }
     public func requestURL(for call: ChatCall) -> URL { Self.localURL }
 
@@ -102,7 +106,7 @@ public final class LC0Transport: ChatTransport, @unchecked Sendable {
         return try await NetworkTrace.track(.lc0Move, request: nil) { trace in
             do {
                 let output = try await LocalCLIProcess().run(binary: settings.binary, arguments: arguments, directory: directory,
-                    environment: environment, timeout: timeoutOverride ?? TimeInterval(settings.moveSeconds + 90),
+                    environment: environment, timeout: try RequestTiming.timeout(fallback: timeoutOverride ?? TimeInterval(settings.moveSeconds + 90)),
                     initialInput: "uci\n", onLine: conversation.consume)
                 await trace.payload(bytes: output.stdout.count + output.stderr.count, exitCode: output.status)
                 try Task.checkCancellation()

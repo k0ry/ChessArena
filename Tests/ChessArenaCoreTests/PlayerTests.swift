@@ -128,7 +128,7 @@ final class PlayerTests: XCTestCase {
     }
 
     @MainActor
-    func testUnreadableBodyCountsAsAnAttemptAndADropPausesTheSameSeat() async throws {
+    func testUnreadableBodyPausesWithoutResultAndADropRetriesTheSameSeat() async throws {
         let server = MiniHTTPServer()
         let seen = SeenList()
         let gate = AttemptGate()
@@ -151,10 +151,14 @@ final class PlayerTests: XCTestCase {
         gate.mode = .unreadable
         let unreadable = try makeHTTPEngine(port: server.port)
         try await unreadable.start(at: 0)
-        try await waitUntil { unreadable.moveRequestCount >= 2 }
-        XCTAssertFalse(unreadable.paused)
+        try await waitUntil { unreadable.paused }
+        XCTAssertEqual(unreadable.moveRequestCount, 3)
+        XCTAssertNil(unreadable.retryAt)
+        XCTAssertNil(unreadable.referee.end)
         XCTAssertEqual(unreadable.referee.position.fen, Position.standard().fen)
-        try await waitUntil(timeout: 6) { unreadable.speech.contains { $0.kind == .final } }
+        XCTAssertFalse(unreadable.speech.contains { $0.kind == .final })
+        unreadable.stop()
+        try await unreadable.closeArchive()
 
         gate.mode = .dropFirstPlayer
         seen.clear()
@@ -171,6 +175,8 @@ final class PlayerTests: XCTestCase {
         let white = seen.values.map { requestText($0.bodyText) }.filter(isOpeningWhite)
         XCTAssertGreaterThanOrEqual(white.count, 2)
         XCTAssertTrue(white.allSatisfy { $0.contains("grok-4.7") })
+        dropped.stop()
+        try await dropped.closeArchive()
     }
 
     @MainActor

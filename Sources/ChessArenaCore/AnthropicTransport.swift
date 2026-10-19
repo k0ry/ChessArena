@@ -49,7 +49,7 @@ public enum AnthropicAPI {
         if stop == "refusal" { throw ChatError.refused }
         guard let content = object["content"] as? [[String: Any]] else { throw ChatError.unreadable }
         let text = content.filter { $0["type"] as? String == "text" }.compactMap { $0["text"] as? String }.joined()
-        if stop == "max_tokens" { throw ChatError.unreadable }
+        if stop == "max_tokens" { throw ChatError.response(.truncated) }
         if let stop, stop != "end_turn", stop != "stop_sequence" { throw ChatError.unreadable }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ChatError.unreadable }
         return text
@@ -120,9 +120,11 @@ public final class AnthropicTransport: ChatTransport {
         self.timeout = timeout
     }
 
+    public func requestTimeout(for call: ChatCall) -> TimeInterval? { timeout }
+
     public func complete(_ call: ChatCall) async throws -> String {
         guard call.route == .anthropic else { throw ChatError.transport }
-        var request = AnthropicAPI.request(url: call.url, apiKey: call.apiKey, method: "POST", timeout: timeout)
+        var request = AnthropicAPI.request(url: call.url, apiKey: call.apiKey, method: "POST", timeout: try RequestTiming.timeout(fallback: timeout))
         request.httpBody = try JSONSerialization.data(withJSONObject: AnthropicAPI.body(for: call))
         return try await AnthropicAPI.perform(request, operation: .anthropicMessages, session: session) { data in
             try AnthropicAPI.text(from: data)

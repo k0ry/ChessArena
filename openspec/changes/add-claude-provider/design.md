@@ -65,7 +65,7 @@ content-type: application/json
 `stop_reason`:
 
 - `end_turn` — нормальный ответ.
-- `max_tokens` — `ChatError.unreadable`.
+- `max_tokens` — `ChatError.response(.truncated)`, ручная пауза без результата (контракт от 18 октября 2026).
 - `refusal` — `ChatError.refused`, см. решение 4. HTTP-статус при этом 200, поэтому проверка `stop_reason` обязательна до чтения `content`.
 - иные значения (`tool_use`, `pause_turn`) невозможны без инструментов и трактуются как `unreadable`.
 

@@ -34,6 +34,18 @@ public final class ArenaChatTransport: ChatTransport {
         return api.requestURL(for: call)
     }
 
+    public func requestTimeout(for call: ChatCall) -> TimeInterval? {
+        switch call.route {
+        case .lc0: return lc0.requestTimeout(for: call)
+        case .deepseek: return deepseek.requestTimeout(for: call)
+        case .anthropic: return anthropic.requestTimeout(for: call)
+        case .geminiCLI, .claudeCLI: return nil
+        case .http:
+            if call.url.host == "api.openai.com", connection != nil { return RequestTimeouts.player }
+            return api.requestTimeout(for: call)
+        }
+    }
+
     public func complete(_ call: ChatCall) async throws -> String {
         if call.route == .lc0 { return try await lc0.complete(call) }
         if call.route == .deepseek { return try await deepseek.complete(call) }
@@ -51,7 +63,7 @@ public final class ArenaChatTransport: ChatTransport {
         do { token = try await connection.accessToken() }
         catch { throw ChatError.http(status: 401, reason: .authentication) }
         var request = URLRequest(url: URL(string: "https://api.openai.com/v1/responses")!)
-        request.httpMethod = "POST"; request.timeoutInterval = RequestTimeouts.player
+        request.httpMethod = "POST"; request.timeoutInterval = try RequestTiming.timeout(fallback: RequestTimeouts.player)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")

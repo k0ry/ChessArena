@@ -107,7 +107,7 @@ final class MatchRuntime: ObservableObject {
     private let secrets = KeychainSecretStore(service: "com.chessarena.broadcast")
     let voice = BroadcastVoice()
     private var engine: MatchEngine?
-    private var startedAt: Date?
+    private var startedAt: TimeInterval?
     private var ticker: Task<Void, Never>?
 
     private let sessionStore = SessionStore(url: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -150,9 +150,7 @@ final class MatchRuntime: ObservableObject {
                 if let game = saved.game {
                     scene.show(position: game.referee.position)
                     picture = game.picture
-                    picture.thinkingSide = nil
-                    picture.thinkingSelfNotes = nil
-                    picture.pausedPlayer = nil
+                    picture.clearPendingRequest(language: language)
                     moveNumber = game.referee.position.fullmove
                 }
                 // Restoring the board must not send a move or advance a finished series.
@@ -189,9 +187,12 @@ final class MatchRuntime: ObservableObject {
     /// Called synchronously after game mutations, once a second for the clock, and on quit.
     func saveState() {
         guard loaded, !restoring, savingEnabled else { return }
-        if let engine { savedGame = engine.checkpoint; gameMemory = engine.gameMemory }
-        if let end = savedGame?.referee.end, let round = series.roundID,
-           series.complete(round: round, result: end, now: Date().timeIntervalSinceReferenceDate, startIntermission: false) {
+        if let engine {
+            savedGame = engine.checkpoint; gameMemory = engine.gameMemory
+            if let error = engine.archive.diagnosticError { persistenceError = error }
+        }
+        if let savedGame, let end = savedGame.referee.end, let round = series.roundID,
+           series.complete(round: round, result: end, position: savedGame.referee.position, now: Date().timeIntervalSinceReferenceDate, startIntermission: false) {
             nextGameIn = nil
             canRepeatRequest = false
             if let data = try? JSONEncoder().encode(series.score) {
@@ -334,7 +335,7 @@ final class MatchRuntime: ObservableObject {
             .appendingPathComponent(ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-") + "-" + round.uuidString + "-" + UUID().uuidString, isDirectory: true)
         let white = playerSeat(whitePlayer, side: .white)
         let black = playerSeat(blackPlayer, side: .black)
-        let archive = MatchArchive(directory: folder, whiteName: white.name, blackName: black.name)
+        let archive = MatchArchive(directory: folder, whiteName: white.name, blackName: black.name, roundID: round)
         let match = MatchEngine(
             scene: scene,
             voice: voice,
@@ -360,7 +361,7 @@ final class MatchRuntime: ObservableObject {
         }
         engine = match
         matchRunning = true
-        startedAt = Date().addingTimeInterval(-(saved?.elapsed ?? 0))
+        startedAt = RequestTiming.monotonicNow() - (saved?.elapsed ?? 0)
         nextGameIn = series.remaining(at: Date().timeIntervalSinceReferenceDate)
         paused = false
         moveNumber = match.referee.position.fullmove
@@ -387,7 +388,10 @@ final class MatchRuntime: ObservableObject {
     }
 
     func repeatPlayerRequest() {
-        guard let engine, engine.canRepeatPlayerRequest else { return }
+        guard let engine, engine.canRepeatPlayerRequest, validatePlayers() else { return }
+        engine.white = playerSeat(whitePlayer, side: .white)
+        engine.black = playerSeat(blackPlayer, side: .black)
+        engine.host = configuredHost
         engine.repeatPlayerRequest()
         picture = engine.picture
         paused = engine.paused
@@ -526,7 +530,7 @@ final class MatchRuntime: ObservableObject {
 
     private func tick() async {
         guard let engine, let startedAt else { return }
-        let elapsed = Date().timeIntervalSince(startedAt)
+        let elapsed = RequestTiming.monotonicNow() - startedAt
         scene.applyCamera(at: elapsed)
         if engine.paused {
             engine.white = playerSeat(whitePlayer, side: .white)
@@ -553,9 +557,9 @@ final class MatchRuntime: ObservableObject {
         } else if engine.phase == "preparing" {
             status = language.text("Ход получен · готовим озвучку и ждём окончания текущей реплики…", "Move received · preparing audio and waiting for the current utterance…")
         } else if engine.paused {
-            status = engine.pauseReason ?? language.text("Автоматический повтор запроса…", "Retrying automatically…")
+            status = engine.picture.requestStatus?.detail(language) ?? engine.pauseReason ?? language.text("Ожидается ручное продолжение.", "Waiting for manual resume.")
         } else {
-            status = language.text("Партия идёт", "Match in progress")
+            status = engine.picture.requestStatus?.detail(language) ?? language.text("Партия идёт", "Match in progress")
         }
         if let round = series.nextRoundIfDue(at: now) {
             engine.onStateChanged = nil

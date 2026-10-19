@@ -90,7 +90,7 @@ final class ClaudeProviderTests: XCTestCase {
         XCTAssertEqual(try AnthropicAPI.text(from: envelope("end_turn", text: "fine")), "fine")
         XCTAssertThrowsError(try AnthropicAPI.text(from: envelope("refusal", text: nil))) { XCTAssertEqual($0 as? ChatError, .refused) }
         XCTAssertThrowsError(try AnthropicAPI.text(from: envelope("refusal", text: "partial"))) { XCTAssertEqual($0 as? ChatError, .refused) }
-        XCTAssertThrowsError(try AnthropicAPI.text(from: envelope("max_tokens", text: #"{"move":"e2"#))) { XCTAssertEqual($0 as? ChatError, .unreadable) }
+        XCTAssertThrowsError(try AnthropicAPI.text(from: envelope("max_tokens", text: #"{"move":"e2"#))) { XCTAssertEqual($0 as? ChatError, .response(.truncated)) }
         XCTAssertThrowsError(try AnthropicAPI.text(from: envelope("tool_use", text: "x"))) { XCTAssertEqual($0 as? ChatError, .unreadable) }
         XCTAssertThrowsError(try AnthropicAPI.text(from: envelope("end_turn", text: "  "))) { XCTAssertEqual($0 as? ChatError, .unreadable) }
         XCTAssertThrowsError(try AnthropicAPI.text(from: Data("nope".utf8))) { XCTAssertEqual($0 as? ChatError, .unreadable) }

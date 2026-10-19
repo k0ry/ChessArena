@@ -40,7 +40,7 @@ final class ClaudeCLITests: XCTestCase {
         XCTAssertThrowsError(try ClaudeCLI.parse(output("", "Error: request timed out", 1))) { XCTAssertEqual($0 as? ChatError, .claudeCLI(.timeout)) }
         XCTAssertTrue(ChatError.claudeCLI(.quota).pausesWithoutRetry)
         XCTAssertTrue(ChatError.refused.pausesWithoutRetry)
-        XCTAssertFalse(ChatError.http(status: 401, reason: .authentication).pausesWithoutRetry)
+        XCTAssertTrue(ChatError.http(status: 401, reason: .authentication).pausesWithoutRetry)
     }
 
     func testVersionModelsArgumentsAndEnvironment() {

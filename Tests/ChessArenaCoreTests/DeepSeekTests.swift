@@ -3,6 +3,64 @@ import XCTest
 @testable import ChessArenaCore
 
 final class DeepSeekTests: XCTestCase {
+    func testBudgetPersistsAndLegacyConfigurationUsesOriginalDefault() throws {
+        var config = PlayerConfiguration(provider: .deepseek)
+        config.maxOutputTokens = 32_768
+        let restored = try JSONDecoder().decode(PlayerConfiguration.self, from: JSONEncoder().encode(config))
+        XCTAssertEqual(restored.maxOutputTokens, 32_768)
+        XCTAssertEqual(restored.seat(side: .white, keys: ProviderKeys()).maxOutputTokens, 32_768)
+        let legacy = try JSONDecoder().decode(PlayerConfiguration.self, from: Data(#"{"provider":"DeepSeek","model":"deepseek-v4-pro"}"#.utf8))
+        XCTAssertNil(legacy.maxOutputTokens)
+        var call = deepSeekCall(1)
+        call.maxOutputTokens = restored.maxOutputTokens
+        XCTAssertEqual(DeepSeekAPI.body(for: call)["max_tokens"] as? Int, 32_768)
+        call.maxOutputTokens = legacy.maxOutputTokens
+        XCTAssertEqual(DeepSeekAPI.body(for: call)["max_tokens"] as? Int, 16_384)
+    }
+
+    @MainActor
+    func testLengthFromHTTPPausesGameAndPersistsSafeDiagnosticsWithoutScoring() async throws {
+        let server = MiniHTTPServer(), seen = DeepSeekRequests()
+        server.handler = { request in
+            seen.append(request)
+            return .init(status: 200, body: Data(#"{"choices":[{"finish_reason":"length","message":{"content":"{\"move\":\"e2e4\"}","reasoning_content":"PRIVATE_REASONING fixture-secret"}}],"usage":{"prompt_tokens":500,"completion_tokens":16384,"total_tokens":16884}}"#.utf8))
+        }
+        try server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var white = PlayerConfiguration(provider: .deepseek).seat(side: .white, keys: ProviderKeys(deepseek: "fixture-secret"))
+        white.baseURL = localURL(server.port)
+        let archive = MatchArchive(directory: directory, whiteName: "DeepSeek", blackName: "Gemini")
+        let engine = MatchEngine(scene: BoardScene(), voice: ScriptedVoice(), transport: DeepSeekTransport(timeout: 3), archive: archive,
+                                 white: white, black: Seat.defaultBlack(apiKey: ""), host: Seat.defaultWhite(apiKey: ""))
+        let log = ModelLog(); engine.modelLog = log
+        var series = MatchSeries(); let round = series.start()
+        engine.onGameEnded = { end in _ = series.complete(round: round, result: end, position: engine.referee.position, now: 0) }
+        try await engine.start(at: 0)
+        for _ in 0..<200 { if engine.paused { break }; try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(engine.paused)
+        XCTAssertNil(engine.retryAt)
+        XCTAssertTrue(engine.pauseReason?.contains("обрезан") == true)
+        XCTAssertNil(engine.referee.end)
+        XCTAssertEqual(series.score.games, 0)
+        XCTAssertNil(series.restartAt)
+        XCTAssertEqual(engine.referee.position, .standard())
+        XCTAssertEqual(engine.finalCards, 0)
+        await engine.advance(to: 100_000)
+        XCTAssertEqual(seen.values.count, 1)
+        XCTAssertTrue(log.entries.first?.text.contains("finish_reason: length") == true)
+        engine.stop(); try await engine.closeArchive()
+        let diagnostics = try String(contentsOf: archive.diagnosticsURL, encoding: .utf8)
+        XCTAssertTrue(diagnostics.contains("length"))
+        XCTAssertTrue(diagnostics.contains("truncated"))
+        XCTAssertTrue(diagnostics.contains("16384"))
+        XCTAssertFalse(diagnostics.contains("PRIVATE_REASONING"))
+        XCTAssertFalse(diagnostics.contains("fixture-secret"))
+        XCTAssertTrue(try String(contentsOf: archive.pgnURL, encoding: .utf8).contains("[Result \"*\"]"))
+        XCTAssertFalse(archive.journal.contains { $0.kind == "final" })
+        XCTAssertNil(engine.gameMemory.advice(for: white))
+    }
+
     func testIndependentSeatsKeysDefaultsAndHostSelection() throws {
         let keys = ProviderKeys(grok: "grok", chatGPT: "openai", anthropic: "anthropic", deepseek: " deepseek-key\n")
         let white = PlayerConfiguration(provider: .deepseek)
@@ -71,7 +129,7 @@ final class DeepSeekTests: XCTestCase {
         XCTAssertEqual(try DeepSeekAPI.text(from: deepSeekEnvelope(valid)), valid)
         for finish in ["length", "tool_calls", "unknown"] {
             XCTAssertThrowsError(try DeepSeekAPI.text(from: deepSeekEnvelope(valid, finish: finish))) {
-                XCTAssertEqual($0 as? ChatError, .unreadable)
+                XCTAssertEqual($0 as? ChatError, .response(finish == "length" ? .truncated : .schema))
             }
         }
         XCTAssertThrowsError(try DeepSeekAPI.text(from: deepSeekEnvelope(valid, finish: "content_filter"))) {
@@ -82,9 +140,10 @@ final class DeepSeekTests: XCTestCase {
                 XCTAssertEqual($0 as? ChatError, .transport)
             }
         }
-        for data in [deepSeekEnvelope("  \n"), Data("broken".utf8), Data(#"{"choices":[{"message":{"content":"ok"}}]}"#.utf8),
+        XCTAssertThrowsError(try DeepSeekAPI.text(from: deepSeekEnvelope("  \n"))) { XCTAssertEqual($0 as? ChatError, .response(.empty)) }
+        for data in [Data("broken".utf8), Data(#"{"choices":[{"message":{"content":"ok"}}]}"#.utf8),
                      deepSeekEnvelope(valid, tools: [["id": "unexpected"]])] {
-            XCTAssertThrowsError(try DeepSeekAPI.text(from: data)) { XCTAssertEqual($0 as? ChatError, .unreadable) }
+            XCTAssertThrowsError(try DeepSeekAPI.text(from: data)) { XCTAssertEqual($0 as? ChatError, .response(.schema)) }
         }
     }
 

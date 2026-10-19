@@ -550,6 +550,7 @@ public struct Position: Equatable, Sendable {
 public enum GameEnd: Equatable, Sendable, Codable {
     case checkmate(winner: Side)
     case stalemate
+    /// Decode-only compatibility for old sessions; never a valid new game result.
     case resignation(loser: Side)
 
     public var winner: Side? {
@@ -582,7 +583,6 @@ public struct AcceptedMove: Equatable, Sendable, Codable {
 public enum Submission: Equatable, Sendable {
     case accepted(AcceptedMove, end: GameEnd?)
     case rejected(reason: String, attempt: Int)
-    case resigned(GameEnd)
     case ignored
 }
 
@@ -591,15 +591,12 @@ public struct Referee: Sendable, Codable, Equatable {
     public private(set) var initialFEN: String?
     public private(set) var position: Position
     public private(set) var accepted: [AcceptedMove] = []
-    public private(set) var end: GameEnd?
+    public var end: GameEnd? { position.gameEnd }
     private var consecutiveFailures = 0
 
     public init(position: Position = .standard()) {
         self.position = position
         self.initialFEN = position.fen
-        if let terminal = position.terminal() {
-            end = terminal == .stalemate ? .stalemate : .checkmate(winner: position.sideToMove.opposite)
-        }
     }
 
     public var legalUCI: [String] {
@@ -608,39 +605,15 @@ public struct Referee: Sendable, Codable, Equatable {
 
     public mutating func submit(rawMove: String, taunt: String) -> Submission {
         guard end == nil else { return .ignored }
-        if position.terminal() != nil {
-            end = position.terminal().map { terminal in
-                switch terminal {
-                case .checkmate(let winner): return .checkmate(winner: winner)
-                case .stalemate: return .stalemate
-                }
-            }
-            return .ignored
-        }
         guard let parsed = position.parseUCI(rawMove), position.isLegal(parsed) else {
-            consecutiveFailures += 1
-            if consecutiveFailures >= 3 {
-                let loser = position.sideToMove
-                let gameEnd = GameEnd.resignation(loser: loser)
-                end = gameEnd
-                return .resigned(gameEnd)
-            }
+            consecutiveFailures = min(consecutiveFailures, Int.max - 1) + 1
             let reason = "Illegal or unreadable move \(rawMove)."
             return .rejected(reason: reason, attempt: consecutiveFailures)
         }
         consecutiveFailures = 0
         let san = position.san(parsed)
         position = position.applying(parsed)
-        let gameEnd: GameEnd?
-        if let terminal = position.terminal() {
-            switch terminal {
-            case .checkmate(let winner): gameEnd = .checkmate(winner: winner)
-            case .stalemate: gameEnd = .stalemate
-            }
-            end = gameEnd
-        } else {
-            gameEnd = nil
-        }
+        let gameEnd = position.gameEnd
         let record = AcceptedMove(move: parsed, san: san, taunt: taunt, fenAfter: position.fen)
         accepted.append(record)
         return .accepted(record, end: gameEnd)
@@ -662,5 +635,15 @@ extension Position: Codable {
     public func encode(to encoder: Encoder) throws {
         var value = encoder.singleValueContainer()
         try value.encode(fen)
+    }
+}
+
+public extension Position {
+    var gameEnd: GameEnd? {
+        switch terminal() {
+        case .checkmate(let winner): return .checkmate(winner: winner)
+        case .stalemate: return .stalemate
+        case nil: return nil
+        }
     }
 }

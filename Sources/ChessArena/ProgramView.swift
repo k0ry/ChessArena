@@ -87,16 +87,25 @@ private struct ReplyWindow: View {
             .frame(maxHeight: .infinity)
 
             if let player = picture.pausedPlayer {
+                let request = picture.requestStatus ?? RequestStatus(mode: .manualPause, attempt: 0)
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("\(player.uppercased()) · " + language.text("ПОВТОР ЗАПРОСА", "RETRYING"))
+                    Text("\(player.uppercased()) · " + request.title(language))
                         .font(.system(size: 13, weight: .semibold))
-                    Text(language.text("Повторяем автоматически…", "Retrying automatically…"))
+                    Text(request.detail(language))
                         .font(.system(size: 22, weight: .medium, design: .serif))
                 }
                 .foregroundStyle(.orange)
                 .padding(24)
+            } else if picture.requestStatus?.mode == .preparing {
+                Text(picture.requestStatus?.detail(language) ?? "")
+                    .padding(24)
             } else if let side = picture.thinkingSide {
-                ThinkingLine(name: side == .white ? picture.whiteName : picture.blackName, side: side, language: language)
+                VStack(alignment: .leading, spacing: 6) {
+                    ThinkingLine(name: side == .white ? picture.whiteName : picture.blackName, side: side, language: language)
+                    if let request = picture.requestStatus {
+                        Text(request.detail(language)).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                     .padding(.horizontal, 28)
                     .padding(.top, 8)
                     .padding(.bottom, 24)

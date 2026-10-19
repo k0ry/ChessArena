@@ -12,9 +12,9 @@ public enum BroadcastLanguage: String, CaseIterable, Identifiable, Sendable, Cod
             + " Use only \(self == .russian ? "Russian" : "English") for spoken commentary and taunts. Keep structured output and chess notation unchanged."
     }
     public func result(_ end: GameEnd, white: String, black: String) -> String {
-        guard let winner = end.winner else { return text("НИЧЬЯ", "DRAW") }
+        guard let winner = end.winner else { return text("ПАТ · НИЧЬЯ", "STALEMATE · DRAW") }
         let name = winner == .white ? white : black
-        return text("\(name) ПОБЕЖДАЕТ", "\(name) WINS")
+        return text("МАТ · \(name) ПОБЕЖДАЕТ", "CHECKMATE · \(name) WINS")
     }
 }
 
@@ -26,11 +26,20 @@ public struct SeriesScore: Codable, Equatable, Sendable {
     public var white: String { Self.format(whiteHalfPoints) }
     public var black: String { Self.format(blackHalfPoints) }
     private static func format(_ half: Int) -> String { half.isMultiple(of: 2) ? "\(half / 2)" : "\(half / 2)½" }
-    public mutating func record(_ end: GameEnd) {
+    public mutating func record(_ end: GameEnd, position: Position) {
+        guard position.gameEnd == end else { return }
         games += 1
         whiteHalfPoints += end.winner == .white ? 2 : (end.winner == nil ? 1 : 0)
         blackHalfPoints += end.winner == .black ? 2 : (end.winner == nil ? 1 : 0)
     }
+    /// Undo only the one invalid result explicitly attached to a legacy round.
+    mutating func undoLegacyResult(_ end: GameEnd) {
+        let white = end.winner == .white ? 2 : (end.winner == nil ? 1 : 0)
+        let black = end.winner == .black ? 2 : (end.winner == nil ? 1 : 0)
+        guard games > 0, whiteHalfPoints >= white, blackHalfPoints >= black else { return }
+        games -= 1; whiteHalfPoints -= white; blackHalfPoints -= black
+    }
+
 }
 
 /// Owns round identity, exactly-once scoring and the restart deadline independently of API/voice work.
@@ -64,10 +73,10 @@ public struct MatchSeries: Codable {
         return id
     }
     @discardableResult
-    public mutating func complete(round: UUID, result: GameEnd, now: TimeInterval, startIntermission: Bool = true) -> Bool {
-        guard running, roundID == round, self.result == nil else { return false }
+    public mutating func complete(round: UUID, result: GameEnd, position: Position, now: TimeInterval, startIntermission: Bool = true) -> Bool {
+        guard running, roundID == round, self.result == nil, position.gameEnd == result else { return false }
         self.result = result
-        score.record(result)
+        score.record(result, position: position)
         restartAt = startIntermission ? now + Self.intermission : nil
         return true
     }
@@ -83,6 +92,14 @@ public struct MatchSeries: Codable {
     public mutating func nextRoundIfDue(at now: TimeInterval) -> UUID? {
         guard running, let deadline = restartAt, now >= deadline else { return nil }
         return beginRound()
+    }
+    @discardableResult
+    public mutating func recoverLegacyResult(position: Position) -> Bool {
+        guard let result, result != position.gameEnd else { return false }
+        score.undoLegacyResult(result)
+        self.result = nil
+        stop()
+        return true
     }
     public mutating func stop() { running = false; restartAt = nil }
 }

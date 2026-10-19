@@ -4,6 +4,127 @@ import XCTest
 
 @MainActor
 final class MatchTests: XCTestCase {
+    func testAllProvidersPauseAfterThreeIllegalRepliesAndResumeSameBoard() async throws {
+        for provider in NeuralProvider.allCases {
+            let rig = try makeRig(whitePlayer: .init(provider: provider))
+            try await rig.engine.start(at: 0)
+            for attempt in 1...3 {
+                try await waitUntil { rig.engine.moveRequestCount == attempt && rig.chat.calls.count == attempt }
+                rig.chat.fulfill(where: { $0.system.contains("JSON") }, body: #"{"move":"e2e5","self_notes":"REJECTED"}"#)
+            }
+            try await waitUntil { rig.engine.paused }
+            await rig.engine.advance(to: 10)
+            XCTAssertNil(rig.engine.retryAt)
+            XCTAssertEqual(rig.engine.moveRequestCount, 3)
+            XCTAssertEqual(rig.engine.referee.position, .standard())
+            XCTAssertNil(rig.engine.referee.end)
+            XCTAssertNil(rig.engine.checkpoint.whiteSelfNotes)
+            XCTAssertEqual(rig.engine.finalCards, 0)
+            XCTAssertFalse(rig.chat.calls.contains { $0.user.contains("Result:") })
+            rig.engine.resume()
+            try await waitUntil { rig.chat.calls.count == 4 }
+            rig.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove("e2e4", ""))
+            try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
+            rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "Move accepted.")
+            try await waitUntil { rig.engine.boardVersion == 1 }
+            XCTAssertNil(rig.engine.referee.end)
+            rig.engine.stop()
+            try await rig.engine.closeArchive()
+            let events = try String(contentsOf: rig.engine.archive.diagnosticsURL, encoding: .utf8)
+            XCTAssertTrue(events.contains("illegalMove"))
+            XCTAssertTrue(events.contains("paused"))
+            XCTAssertTrue(events.contains("accepted"))
+            XCTAssertFalse(events.contains("REJECTED"))
+        }
+    }
+
+    func testStalemateMoveScoresOnceAndArchivesDraw() async throws {
+        let rig = try makeRig()
+        rig.engine.hostTimeout = 0.02; rig.engine.learningTimeout = 0.02
+        var saved = rig.engine.checkpoint
+        saved.referee = Referee(position: Position.position(fen: "7k/2Q5/6K1/8/8/8/8/8 w - - 0 1")!)
+        rig.engine.restore(saved)
+        var series = MatchSeries(); let round = series.start()
+        var results = 0
+        rig.engine.onGameEnded = { end in
+            results += 1
+            _ = series.complete(round: round, result: end, position: rig.engine.referee.position, now: 0)
+        }
+        try await rig.engine.start(at: 0)
+        try await waitUntil { rig.chat.calls.count == 1 }
+        rig.chat.fulfill(where: { $0.system.contains("JSON") }, body: jsonMove("c7f7", ""))
+        try await waitUntil { rig.engine.finalCards == 1 }
+        XCTAssertEqual(rig.engine.referee.end, .stalemate)
+        XCTAssertEqual(results, 1)
+        XCTAssertEqual(series.score.games, 1)
+        XCTAssertEqual(series.score.whiteHalfPoints, 1)
+        XCTAssertEqual(series.score.blackHalfPoints, 1)
+        XCTAssertEqual(rig.engine.moveRequestCount, 1)
+        await rig.engine.advance(to: 1)
+        XCTAssertEqual(results, 1)
+        rig.engine.stop(); try await rig.engine.closeArchive()
+        XCTAssertTrue(rig.engine.archive.pgnText().contains("[Result \"1/2-1/2\"]"))
+        XCTAssertTrue(rig.engine.archive.pgnText().contains("[Termination \"stalemate\"]"))
+    }
+
+    func testCLITimeoutBatchAndStopPreserveBoardAndNotes() async throws {
+        for error: ChatError in [.cli(.timeout), .claudeCLI(.timeout)] {
+            let rig = try makeRig()
+            var saved = rig.engine.checkpoint
+            saved.whiteSelfNotes = "accepted notes"
+            rig.engine.restore(saved)
+            try await rig.engine.start(at: 0)
+            for attempt in 1...3 {
+                try await waitUntil { rig.chat.calls.count == attempt }
+                rig.chat.fail(where: { $0.system.contains("JSON") }, error: error)
+                try await waitUntil { rig.engine.paused }
+                if attempt < 3 {
+                    XCTAssertEqual(rig.engine.picture.requestStatus?.mode, .retryScheduled)
+                    await rig.engine.advance(to: try XCTUnwrap(rig.engine.retryAt))
+                }
+            }
+            XCTAssertEqual(rig.engine.picture.requestStatus?.mode, .manualPause)
+            XCTAssertEqual(rig.engine.picture.requestStatus?.attempt, 3)
+            XCTAssertNil(rig.engine.retryAt)
+            XCTAssertNil(rig.engine.referee.end)
+            XCTAssertEqual(rig.engine.referee.position, .standard())
+            XCTAssertEqual(rig.engine.checkpoint.whiteSelfNotes, "accepted notes")
+            XCTAssertEqual(rig.engine.finalCards, 0)
+            rig.engine.resume()
+            try await waitUntil { rig.chat.calls.count == 4 }
+            rig.chat.fail(where: { $0.system.contains("JSON") }, error: error)
+            try await waitUntil { rig.engine.paused }
+            XCTAssertNotNil(rig.engine.retryAt)
+            rig.engine.stop()
+            await rig.engine.advance(to: 1000)
+            XCTAssertEqual(rig.chat.calls.count, 4)
+            try await rig.engine.closeArchive()
+            XCTAssertTrue(rig.engine.archive.pgnText().contains("[Result \"*\"]"))
+        }
+    }
+
+    func testNetworkRetryBatchIsBoundedAndManualResumeResetsIt() async throws {
+        let rig = try makeRig()
+        try await rig.engine.start(at: 0)
+        for attempt in 1...3 {
+            try await waitUntil { rig.chat.calls.count == attempt }
+            rig.chat.fail(where: { $0.system.contains("JSON") }, error: .timeout)
+            try await waitUntil { rig.engine.paused }
+            if attempt < 3 { await rig.engine.advance(to: try XCTUnwrap(rig.engine.retryAt)) }
+        }
+        XCTAssertNil(rig.engine.retryAt)
+        await rig.engine.advance(to: 100_000)
+        XCTAssertEqual(rig.engine.moveRequestCount, 3)
+        XCTAssertNil(rig.engine.referee.end)
+        rig.engine.resume()
+        try await waitUntil { rig.chat.calls.count == 4 }
+        rig.chat.fail(where: { $0.system.contains("JSON") }, error: .transport)
+        try await waitUntil { rig.engine.paused }
+        XCTAssertNotNil(rig.engine.retryAt)
+        rig.engine.stop()
+        try await rig.engine.closeArchive()
+    }
+
     func testFreshMatchResetsReusedBoardBeforeRequestingOpeningMove() async throws {
         let rig = try makeRig()
         let position = Position.standard()
@@ -37,12 +158,12 @@ final class MatchTests: XCTestCase {
         let fen = rig.engine.referee.position.fen
         rig.chat.fail(where: { $0.route == .deepseek }, error: .http(status: 402, reason: .balance))
         try await waitUntil { rig.engine.paused }
-        XCTAssertNotNil(rig.engine.retryAt)
+        XCTAssertNil(rig.engine.retryAt)
         XCTAssertEqual(rig.engine.referee.position.fen, fen)
         XCTAssertTrue(rig.engine.pauseReason?.contains("балансе DeepSeek") == true)
         rig.engine.white.apiKey = "corrected-key"
         rig.engine.white.model = "deepseek-flash"
-        await rig.engine.advance(to: try XCTUnwrap(rig.engine.retryAt))
+        rig.engine.resume()
         try await waitUntil { rig.chat.calls.count == 2 }
         let retry = try XCTUnwrap(rig.chat.calls.last)
         XCTAssertEqual(retry.apiKey, "corrected-key")
@@ -112,7 +233,7 @@ final class MatchTests: XCTestCase {
         rig.engine.stop(); try await rig.engine.closeArchive()
     }
 
-    func testSlowSynthesisKeepsBoardAndThinkingUntilPlaybackStarts() async throws {
+    func testSlowSynthesisKeepsBoardAndShowsPreparationUntilPlaybackStarts() async throws {
         let rig = try makeRig()
         try await rig.engine.start(at: 0)
         let voice = try XCTUnwrap(rig.engine.voice as? ScriptedVoice)
@@ -126,7 +247,8 @@ final class MatchTests: XCTestCase {
         XCTAssertEqual(rig.engine.boardVersion, 0)
         XCTAssertEqual(rig.engine.checkpoint.referee.position, Position.standard())
         XCTAssertNil(rig.engine.scene.node(named: "piece-pawn-e4"))
-        XCTAssertEqual(rig.engine.picture.thinkingSide, .white)
+        XCTAssertNil(rig.engine.picture.thinkingSide)
+        XCTAssertEqual(rig.engine.picture.requestStatus?.mode, .preparing)
         var beganTogether = false
         voice.onSpeaking = {
             if voice.spoken.last?.kind == .move {
@@ -433,8 +555,9 @@ final class MatchTests: XCTestCase {
             rig.chat.fulfill(where: { $0.system.contains("Reply with JSON") }, body: String(decoding: body, as: UTF8.self))
             try await waitUntil { rig.chat.calls.filter { $0.system.contains("already on the board") }.count == index + 1 }
             XCTAssertNil(rig.chat.calls.last?.selfNotes)
-            XCTAssertEqual(rig.engine.picture.thinkingSide, index.isMultiple(of: 2) ? .white : .black)
-            XCTAssertEqual(rig.engine.picture.thinkingSelfNotes, call.selfNotes)
+            XCTAssertNil(rig.engine.picture.thinkingSide)
+            XCTAssertNil(rig.engine.picture.thinkingSelfNotes)
+            XCTAssertEqual(rig.engine.picture.requestStatus?.mode, .preparing)
             XCTAssertFalse(rig.chat.calls.last!.user.contains("PRIVATE_PLAN"))
             rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "Played.")
         }
@@ -551,7 +674,7 @@ final class MatchTests: XCTestCase {
         XCTAssertTrue(rig.chat.calls.last?.user.contains(original) == true)
         rig.chat.fail(where: { $0.route == .anthropic && $0.model == "claude-sonnet-5-5" }, error: .http(status: 401, reason: .authentication))
         try await waitUntil { rig.engine.paused }
-        XCTAssertNotNil(rig.engine.retryAt, "HTTP errors keep the shared automatic retry")
+        XCTAssertNil(rig.engine.retryAt, "Authentication requires an explicit retry")
         XCTAssertTrue(rig.engine.pauseReason?.contains("HTTP 401") == true)
         rig.engine.stop()
         try await rig.engine.closeArchive()
@@ -627,10 +750,13 @@ final class MatchTests: XCTestCase {
 
     func testThinkCountdownFollowsTheMoveRequestAndResetsOnRepeat() async throws {
         let rig = try makeRig()
+        let clock = ManualRequestClock()
+        rig.engine.requestNow = { clock.now }
         try await rig.engine.start(at: 0)
         try await waitUntil { rig.chat.calls.count == 1 }
         XCTAssertEqual(rig.engine.picture.thinkingSide, .white)
         XCTAssertEqual(rig.engine.picture.thinkSecondsLeft, Int(RequestTimeouts.player))
+        clock.set(12.4)
         await rig.engine.advance(to: 12.4)
         XCTAssertEqual(rig.engine.picture.thinkSecondsLeft, Int(RequestTimeouts.player) - 12, "rounded up to whole seconds")
         rig.engine.repeatPlayerRequest()
@@ -648,7 +774,8 @@ final class MatchTests: XCTestCase {
         rig.chat.fulfill(where: { $0.system.contains("You are White") }, body: jsonMove("e2e4", ""))
         try await waitUntil { rig.chat.calls.contains { $0.system.contains("already on the board") } }
         XCTAssertEqual(rig.engine.referee.accepted.count, 0)
-        XCTAssertNotNil(rig.engine.picture.thinkSecondsLeft, "preparation remains part of thinking")
+        XCTAssertNil(rig.engine.picture.thinkSecondsLeft, "response already received; audio is not LLM waiting")
+        XCTAssertEqual(rig.engine.picture.requestStatus?.mode, .preparing)
         let data = try JSONEncoder().encode(rig.engine.picture)
         var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         legacy.removeValue(forKey: "thinkSecondsLeft")
@@ -681,7 +808,7 @@ final class MatchTests: XCTestCase {
         try await rig.engine.closeArchive()
     }
 
-    func testBlackAPIFailureRetriesAutomaticallyWithSamePosition() async throws {
+    func testBlackQuotaFailureWaitsForManualResumeWithSamePosition() async throws {
         let rig = try makeRig()
         try await rig.engine.start(at: 0)
         try await waitUntil { rig.chat.calls.contains { $0.system.contains("JSON") } }
@@ -702,7 +829,8 @@ final class MatchTests: XCTestCase {
         rig.engine.black.model = "replacement-model"
         await rig.engine.advance(to: 2)
         XCTAssertEqual(rig.engine.moveRequestCount, 2)
-        await rig.engine.advance(to: 3)
+        XCTAssertNil(rig.engine.retryAt)
+        rig.engine.resume()
         try await waitUntil { rig.chat.calls.filter { $0.system.contains("You are Black") }.count == 2 }
         let retry = try XCTUnwrap(rig.chat.calls.last { $0.system.contains("You are Black") })
         XCTAssertTrue(retry.user.contains(fen))
@@ -728,7 +856,8 @@ final class MatchTests: XCTestCase {
         XCTAssertEqual(rig.engine.boardVersion, 0)
         XCTAssertEqual(rig.engine.hostBoardVersions, [1])
         XCTAssertNil(rig.engine.scene.node(named: "piece-pawn-e4"))
-        XCTAssertEqual(rig.engine.picture.thinkingSide, .white)
+        XCTAssertNil(rig.engine.picture.thinkingSide)
+        XCTAssertEqual(rig.engine.picture.requestStatus?.mode, .preparing)
         rig.chat.fulfill(where: { $0.system.contains("already on the board") }, body: "The pawn has left home and already looks unsure.")
         try await waitUntil { rig.engine.speech.contains { $0.kind == .move } }
         XCTAssertNotNil(rig.engine.scene.node(named: "piece-pawn-e4"))
@@ -763,7 +892,7 @@ final class MatchTests: XCTestCase {
         XCTAssertTrue(cancelled.engine.speech.filter { $0.kind == .wait }.isEmpty)
     }
 
-    func testToneResignationAndStall() async throws {
+    func testToneErrorsPauseWithoutResultAndStall() async throws {
         let rig = try makeRig()
         let tone = await rig.engine.toneTest()
         XCTAssertEqual(tone.kind, .tone)
@@ -792,11 +921,18 @@ final class MatchTests: XCTestCase {
             resign.chat.fulfill(where: { $0.system.contains("JSON") }, body: "not json")
             try await Task.sleep(nanoseconds: 30_000_000)
         }
-        try await waitUntil { resign.chat.calls.contains { $0.user.contains("Result:") } }
-        resign.chat.fulfill(where: { $0.user.contains("Result:") }, body: "ChatGPT wins.")
-        try await waitUntil { resign.engine.finalCards == 1 }
-        XCTAssertEqual(resign.engine.picture.banner, "ChatGPT WINS")
-        XCTAssertEqual(resign.engine.referee.end, .resignation(loser: .white))
+        try await waitUntil { resign.engine.paused }
+        XCTAssertNil(resign.engine.retryAt)
+        XCTAssertNil(resign.engine.referee.end)
+        XCTAssertNil(resign.engine.picture.banner)
+        XCTAssertEqual(resign.engine.finalCards, 0)
+        XCTAssertEqual(resign.engine.moveRequestCount, 3)
+        XCTAssertEqual(resign.engine.referee.position, .standard())
+        XCTAssertFalse(resign.chat.calls.contains { $0.user.contains("Result:") })
+        resign.engine.stop()
+        try await resign.engine.closeArchive()
+        XCTAssertTrue(resign.engine.archive.pgnText().contains("[Result \"*\"]"))
+
     }
 
     func testMovesContinueAcrossFiveMinuteMarksWithoutRecaps() async throws {
@@ -888,7 +1024,8 @@ final class MatchTests: XCTestCase {
         let black = try XCTUnwrap(rig.chat.calls.last { $0.system.contains("You are Black") })
         rig.engine.repeatPlayerRequest()
         try await waitUntil { rig.chat.calls.filter { $0.system.contains("You are Black") }.count == 2 }
-        XCTAssertEqual(rig.chat.calls.last { $0.system.contains("You are Black") }, black)
+        XCTAssertEqual(rig.chat.calls.last { $0.system.contains("You are Black") }?.selfNotes, black.selfNotes)
+        XCTAssertTrue(rig.chat.calls.last!.user.contains(rig.engine.referee.position.fen))
         XCTAssertEqual(rig.engine.referee.accepted.count, 1)
         rig.engine.stop()
         XCTAssertFalse(rig.engine.canRepeatPlayerRequest)
@@ -1075,7 +1212,7 @@ final class MatchTests: XCTestCase {
         }
         try await waitUntil { rig.engine.finalCards == 1 }
         XCTAssertEqual(results, [.checkmate(winner: .black)])
-        XCTAssertEqual(rig.engine.picture.banner, "ChatGPT WINS")
+        XCTAssertEqual(rig.engine.picture.banner, "CHECKMATE · ChatGPT WINS")
         await rig.engine.advance(to: 29)
         XCTAssertEqual(rig.engine.phase, "final")
         await rig.engine.advance(to: 30)
@@ -1133,7 +1270,7 @@ final class MatchTests: XCTestCase {
         await rig.engine.advance(to: 131)
         XCTAssertTrue(rig.chat.calls.isEmpty)
         XCTAssertEqual(results, 0)
-        XCTAssertEqual(rig.engine.picture.banner, "ChatGPT WINS")
+        XCTAssertEqual(rig.engine.picture.banner, "CHECKMATE · ChatGPT WINS")
         XCTAssertTrue(rig.engine.archive.pgnText().contains("Qh4#"))
         XCTAssertTrue(rig.engine.archive.pgnText().contains("0-1"))
         rig.engine.stop()

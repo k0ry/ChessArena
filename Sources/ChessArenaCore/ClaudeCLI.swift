@@ -2,7 +2,7 @@ import Foundation
 
 public enum ClaudeCLIError: String, Equatable {
     case missing, incompatible, outdated, authentication, apiKeyMode, quota, model
-    case execution, timeout, outputLimit, invalidResponse, tools
+    case execution, timeout, connection, outputLimit, invalidResponse, tools
 
     public var userMessage: String {
         switch self {
@@ -13,6 +13,7 @@ public enum ClaudeCLIError: String, Equatable {
         case .apiKeyMode: return "Локальный claude настроен на API-ключ, а не на подписку. Выполните /login по подписке в CLI."
         case .quota: return "Лимит использования подписки Claude исчерпан. Дождитесь его восстановления."
         case .model: return "Эта модель Claude недоступна в CLI. Выберите opus, sonnet, haiku или полный ID модели."
+        case .connection: return "Соединение CLI с сервисом прервано."
         case .timeout: return "Локальный CLI не ответил вовремя. Запрос остановлен; можно повторить ход."
         case .outputLimit: return "Ответ CLI превысил допустимый размер. Запрос остановлен."
         case .invalidResponse: return "CLI не вернул завершённый ответ модели. Повторите проверку подключения."
@@ -30,6 +31,7 @@ public enum ClaudeCLIError: String, Equatable {
         if text.contains("model"), ["not found", "invalid", "not support", "unknown", "does not exist"].contains(where: text.contains) { return .model }
         if ["timed out", "timeout"].contains(where: text.contains) { return .timeout }
         if ["permission", "tool denied", "tool call", "tool use"].contains(where: text.contains) { return .tools }
+        if ["socket is not connected", "connection reset", "econnreset", "network connection was lost"].contains(where: text.contains) { return .connection }
         return .execution
     }
 }
@@ -161,7 +163,7 @@ public struct ClaudeCLI: Sendable {
             try await checkVersion()
             let arguments = Self.arguments(for: call)
             guard arguments.joined().utf8.count <= 256 * 1024 else { throw ChatError.claudeCLI(.outputLimit) }
-            let output = try await run(arguments, timeout: call.effort == "low" ? 100 : 600)
+            let output = try await run(arguments, timeout: try RequestTiming.timeout(fallback: operation == .claudeVerify ? RequestTimeouts.host : RequestTimeouts.player))
             await trace.payload(bytes: output.stdout.count + output.stderr.count, exitCode: output.status)
             return try Self.parse(output)
         }

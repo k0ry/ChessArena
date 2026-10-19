@@ -1,0 +1,26 @@
+[
+  {
+    "fen" : "r2q1rk1\/1p1nbppp\/p2pbn2\/4p3\/4P3\/1NN1BP2\/PPPQ2PP\/2KR1B1R w - - 5 11",
+    "max_tokens" : 16384,
+    "model" : "deepseek-v4-pro",
+    "outcome" : "network",
+    "pausesWithoutRetry" : false,
+    "seconds" : 160.73791396617889,
+    "thinking" : "high"
+  },
+  {
+    "fen" : "r2q1rk1\/3nbppp\/p2pb3\/4p1Pn\/1p2P3\/1N2BP2\/PPPQN2P\/2KR1B1R w - - 2 14",
+    "max_tokens" : 16384,
+    "model" : "deepseek-v4-pro",
+    "outcome" : "truncated",
+    "pausesWithoutRetry" : true,
+    "response" : {
+      "completionTokens" : 16384,
+      "finishReason" : "length",
+      "promptTokens" : 890,
+      "totalTokens" : 17274
+    },
+    "seconds" : 226.43187093734741,
+    "thinking" : "high"
+  }
+]

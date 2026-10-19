@@ -15,7 +15,8 @@ final class DeepSeekRequestDelegate: NSObject, URLSessionTaskDelegate, @unchecke
 }
 
 public enum DeepSeekAPI {
-    static let maxTokens = 16_384
+    public static let maxTokens = 16_384
+    public static let tokenBudgets = [8_192, 16_384, 32_768, 65_536, 131_072, 262_144, 393_216]
 
     static func request(url: URL, key: String, method: String, timeout: TimeInterval) -> URLRequest {
         var request = URLRequest(url: url)
@@ -32,7 +33,7 @@ public enum DeepSeekAPI {
             "model": call.model.trimmingCharacters(in: .whitespacesAndNewlines),
             "messages": [["role": "system", "content": call.system]] + call.inputMessages,
             "stream": false, "thinking": ["type": "enabled"], "reasoning_effort": "high",
-            "max_tokens": maxTokens,
+            "max_tokens": call.maxOutputTokens ?? maxTokens,
         ]
         if call.responseFormat == .jsonObject { body["response_format"] = ["type": "json_object"] }
         return body
@@ -41,14 +42,15 @@ public enum DeepSeekAPI {
     static func text(from data: Data) throws -> String {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let choices = object["choices"] as? [[String: Any]], let choice = choices.first,
-              let finish = choice["finish_reason"] as? String else { throw ChatError.unreadable }
+              let finish = choice["finish_reason"] as? String else { throw ChatError.response(.schema) }
+        if finish == "length" { throw ChatError.response(.truncated) }
         if finish == "content_filter" { throw ChatError.refused }
         if finish == "insufficient_system_resource" || finish == "aborted" { throw ChatError.transport }
-        guard finish == "stop", let message = choice["message"] as? [String: Any],
-              let content = message["content"] as? String,
-              !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ChatError.unreadable }
+        guard finish == "stop", let message = choice["message"] as? [String: Any] else { throw ChatError.response(.schema) }
+        guard let content = message["content"] as? String,
+              !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ChatError.response(.empty) }
         if let calls = message["tool_calls"], !(calls is NSNull) {
-            guard let array = calls as? [Any], array.isEmpty else { throw ChatError.unreadable }
+            guard let array = calls as? [Any], array.isEmpty else { throw ChatError.response(.schema) }
         }
         // reasoning_content is deliberately never returned or retained by application state.
         return content
@@ -90,7 +92,7 @@ public enum DeepSeekAPI {
     static func reply(from data: Data, for call: ChatCall) throws -> String {
         let content = try text(from: data)
         guard call.responseFormat == .jsonObject else { return redact(content, key: call.apiKey) }
-        guard let intent = ChatParser.moveIntent(from: content) else { throw ChatError.unreadable }
+        guard let intent = ChatParser.moveIntent(from: content) else { throw ChatError.response(.schema) }
         // Redact decoded fields, including keys echoed using JSON unicode escapes.
         // Only game fields survive; unexpected analysis fields never enter the log or archive.
         var result = ["move": redact(intent.move, key: call.apiKey), "taunt": redact(intent.taunt, key: call.apiKey)]
@@ -135,11 +137,17 @@ public final class DeepSeekTransport: ChatTransport {
         self.session = session; self.timeout = timeout
     }
 
+    public func requestTimeout(for call: ChatCall) -> TimeInterval? { timeout }
+
     public func complete(_ call: ChatCall) async throws -> String {
         guard call.route == .deepseek else { throw ChatError.transport }
-        var request = DeepSeekAPI.request(url: call.url, key: call.apiKey, method: "POST", timeout: timeout)
+        guard (1...393_216).contains(call.maxOutputTokens ?? DeepSeekAPI.maxTokens) else {
+            throw ChatError.http(status: 400, reason: .request)
+        }
+        var request = DeepSeekAPI.request(url: call.url, key: call.apiKey, method: "POST", timeout: try RequestTiming.timeout(fallback: timeout))
         request.httpBody = try JSONSerialization.data(withJSONObject: DeepSeekAPI.body(for: call))
         let data = try await DeepSeekAPI.perform(request, operation: .deepSeekChat, session: session)
+        await ResponseTrace.receive?(ResponseMetadata.chatCompletion(data))
         return try DeepSeekAPI.reply(from: data, for: call)
     }
 }

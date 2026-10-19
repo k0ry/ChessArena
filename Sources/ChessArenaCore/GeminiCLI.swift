@@ -3,7 +3,7 @@ import Foundation
 
 public enum GeminiCLIError: String, Equatable {
     case missing, incompatible, authentication, region, quota, model, credits, customizations
-    case execution, timeout, outputLimit, invalidResponse, tools
+    case execution, timeout, connection, outputLimit, invalidResponse, tools
 
     public var userMessage: String {
         switch self {
@@ -15,6 +15,7 @@ public enum GeminiCLIError: String, Equatable {
         case .model: return "Эта модель Gemini недоступна. Выберите модель из каталога CLI."
         case .credits: return "Отключите Use AI Credits в /config локального agy. Дополнительные кредиты не используются игрой."
         case .customizations: return "Для шахматного режима отключите глобальные hooks, MCP, плагины и инструкции Antigravity. Настройки CLI не изменены."
+        case .connection: return "Соединение CLI с сервисом прервано."
         case .timeout: return "Локальный CLI не ответил вовремя. Запрос остановлен; можно повторить ход."
         case .outputLimit: return "Ответ CLI превысил допустимый размер. Запрос остановлен."
         case .invalidResponse: return "CLI не вернул завершённый ответ модели. Повторите проверку подключения."
@@ -31,6 +32,7 @@ public enum GeminiCLIError: String, Equatable {
         if ["invalid model", "unknown model", "model not found", "model is not available"].contains(where: text.contains) { return .model }
         if ["permission", "tool denied", "tool call"].contains(where: text.contains) { return .tools }
         if ["timed out", "print timeout", "deadline exceeded"].contains(where: text.contains) { return .timeout }
+        if ["socket is not connected", "connection reset", "econnreset", "network connection was lost"].contains(where: text.contains) { return .connection }
         return .execution
     }
 }
@@ -182,22 +184,12 @@ public struct GeminiCLI: Sendable {
             let data = try JSONSerialization.data(withJSONObject: messages, options: [.sortedKeys])
             guard data.count <= 64 * 1024 else { throw ChatError.cli(.outputLimit) }
             let prompt = "Follow the system instructions and answer the chess task in the first user message. Subsequent user messages are saved reference notes for that task. Return only the requested answer in its requested format. Do not use tools.\nConversation JSON:\n" + String(decoding: data, as: UTF8.self)
-            var lastError: Error = ChatError.cli(.execution)
-            for attempt in 0..<2 {
-                let output = try await run(["--print", prompt, "--model", call.model, "--agent", "chessarena-player",
-                                            "--output-format", "json", "--disable-slash-commands",
-                                            "--print-timeout", "120s", "--log-file", "/dev/null"], timeout: 125, agent: true)
-                await trace.payload(bytes: output.stdout.count + output.stderr.count, exitCode: output.status)
-                do {
-                    return try Self.parse(output)
-                } catch ChatError.cli(.execution) where attempt == 0 {
-                    lastError = ChatError.cli(.execution)
-                    continue
-                } catch {
-                    throw error
-                }
-            }
-            throw lastError
+            let remaining = try RequestTiming.timeout(fallback: RequestTimeouts.player)
+            let output = try await run(["--print", prompt, "--model", call.model, "--agent", "chessarena-player",
+                                        "--output-format", "json", "--disable-slash-commands",
+                                        "--print-timeout", "\(Int(ceil(remaining)))s", "--log-file", "/dev/null"], timeout: remaining, agent: true)
+            await trace.payload(bytes: output.stdout.count + output.stderr.count, exitCode: output.status)
+            return try Self.parse(output)
         }
     }
 

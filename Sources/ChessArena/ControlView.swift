@@ -198,6 +198,11 @@ private struct DeepSeekModelPicker: View {
             ForEach(connection.models) { Text($0.name).tag($0.id) }
         }
         TextField("ID модели DeepSeek вручную", text: $player.model)
+        Picker("Лимит ответа (токены)", selection: Binding(get: { player.maxOutputTokens ?? DeepSeekAPI.maxTokens }, set: { player.maxOutputTokens = $0 })) {
+            ForEach(DeepSeekAPI.tokenBudgets, id: \.self) { budget in Text(String(budget)).tag(budget) }
+        }
+        Text("Лимит включает рассуждение и ответ. Больший лимит может увеличить время и стоимость. При обрезании партия ждёт продолжения, счёт не меняется.")
+            .font(.caption).foregroundStyle(.secondary)
     }
 }
 

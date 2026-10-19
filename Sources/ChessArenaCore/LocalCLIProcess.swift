@@ -99,7 +99,7 @@ final class LocalCLIProcess: @unchecked Sendable {
         }
         _ = fcntl(out[0], F_SETFL, O_NONBLOCK)
         _ = fcntl(err[0], F_SETFL, O_NONBLOCK)
-        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        let deadline = RequestTiming.monotonicNow() + timeout
         var stdout = Data(), stderr = Data(), status: Int32 = 0
         var pendingInput = Data((initialInput ?? "").utf8), lineBuffer = Data()
         var buffer = [UInt8](repeating: 0, count: 8192)
@@ -125,7 +125,7 @@ final class LocalCLIProcess: @unchecked Sendable {
         while true {
             lock.lock(); let stopped = cancelled; lock.unlock()
             if stopped { throw CancellationError() }
-            if ProcessInfo.processInfo.systemUptime >= deadline { throw ChatError.cli(.timeout) }
+            if RequestTiming.monotonicNow() >= deadline { throw ChatError.cli(.timeout) }
             if input[1] >= 0, !pendingInput.isEmpty {
                 let written = pendingInput.withUnsafeBytes { write(input[1], $0.baseAddress, $0.count) }
                 if written > 0 { pendingInput.removeFirst(written) }

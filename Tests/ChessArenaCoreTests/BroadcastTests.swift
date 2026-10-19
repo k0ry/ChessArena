@@ -5,6 +5,20 @@ import XCTest
 @testable import ChessArenaCore
 
 final class BroadcastTests: XCTestCase {
+    func testArchiveRejectsResultsUnsupportedByItsRecordedBoard() throws {
+        let archive = MatchArchive(directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), whiteName: "White", blackName: "Black")
+        var referee = Referee()
+        guard case .accepted(let move, _) = referee.submit(rawMove: "e2e4", taunt: "") else { return XCTFail("Expected legal opening") }
+        archive.record(move: move, clock: 0)
+        for result: GameEnd in [.resignation(loser: .white), .checkmate(winner: .black), .stalemate] {
+            archive.markResult(result)
+            XCTAssertTrue(archive.pgnText().contains("[Result \"*\"]"))
+        }
+        archive.markResult(.checkmate(winner: .black), position: terminalBoard(.checkmate(winner: .black)))
+        XCTAssertTrue(archive.pgnText().contains("[Result \"*\"]"), "A different terminal board cannot override the recorded moves")
+        XCTAssertTrue(archive.pgnText().contains("[Termination \"unterminated\"]"))
+    }
+
     func testSpokenTextRemovesEscapesWithoutSpeakingBackslashes() {
         XCTAssertEqual(SpokenText.clean(#"План хорош.\nКороль не согласен.\tСовсем."#), "План хорош. Король не согласен. Совсем.")
         XCTAssertEqual(SpokenText.clean(#"План \"надёжный\".\\nОчень."#), "План \"надёжный\". Очень.")

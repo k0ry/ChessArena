@@ -16,10 +16,16 @@ public struct ModelLogEntry: Identifiable, Equatable {
     public var error: String?
     public var status: Status = .pending
     public var duration: TimeInterval?
+    public var responseMetadata: ResponseMetadata?
+    public var tokenBudget: Int?
 
     public var text: String {
         var parts = ["\(date.formatted(date: .numeric, time: .standard)) · \(context)",
                      "Модель: \(model)", "POST \(endpoint)", "Статус: \(status.rawValue)"]
+        if let tokenBudget { parts.append("Лимит ответа: \(tokenBudget) токенов") }
+        if let responseMetadata {
+            parts.append("finish_reason: \(responseMetadata.finishReason) · prompt_tokens: \(responseMetadata.promptTokens.map(String.init) ?? "—") · completion_tokens: \(responseMetadata.completionTokens.map(String.init) ?? "—")")
+        }
         if let duration { parts.append(String(format: "Время: %.2f с", duration)) }
         parts += ["SYSTEM / INSTRUCTIONS\n\(system)", "USER\n\(user)"]
         if let selfNotes, !selfNotes.isEmpty { parts.append("ЗАМЕТКИ ЭТОГО ИГРОКА (отдельное сообщение)\n\(selfNotes)") }
@@ -43,12 +49,18 @@ public final class ModelLog: ObservableObject {
         var url = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
         url?.user = nil; url?.password = nil; url?.query = nil; url?.fragment = nil
         func clean(_ text: String) -> String { Self.sanitize(text, secrets: [call.apiKey]) }
-        let entry = ModelLogEntry(id: id, date: Date(), context: clean(context), model: clean(call.model),
+        var entry = ModelLogEntry(id: id, date: Date(), context: clean(context), model: clean(call.model),
                                   endpoint: clean(url?.string ?? ""), system: clean(call.system), user: clean(call.user),
                                   selfNotes: call.selfNotes.map(clean), gameAdvice: call.gameAdvice.map(clean))
+        entry.tokenBudget = call.route == .deepseek ? (call.maxOutputTokens ?? DeepSeekAPI.maxTokens) : nil
         entries.insert(entry, at: 0)
         if entries.count > capacity { entries.removeLast(entries.count - capacity) }
         return id
+    }
+
+    public func metadata(_ id: UUID, response: ResponseMetadata) {
+        guard let index = entries.firstIndex(where: { $0.id == id }), entries[index].status == .pending else { return }
+        entries[index].responseMetadata = response
     }
 
     public func succeed(_ id: UUID, response: String, secrets: [String] = []) {

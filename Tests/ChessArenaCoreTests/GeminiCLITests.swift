@@ -120,7 +120,12 @@ final class GeminiCLITests: XCTestCase {
         printf '%s' '{"status":"SUCCESS","num_turns":1,"response":"{\\"move\\":\\"e2e4\\",\\"taunt\\":\\"Go.\\"}"}'
         """, in: directory)
         let cli = GeminiCLI(binary: script.path, home: directory)
-        let response = try await cli.complete(ChatCall(url: URL(string: "local-cli://antigravity")!, apiKey: "NOT_FOR_CLI", model: "gemini-selected", system: "chess", user: "position", selfNotes: "PRIVATE_NOTES", route: .geminiCLI, gameAdvice: "NEXT_GAME_ADVICE"))
+        let call = ChatCall(url: URL(string: "local-cli://antigravity")!, apiKey: "NOT_FOR_CLI", model: "gemini-selected", system: "chess", user: "position", selfNotes: "PRIVATE_NOTES", route: .geminiCLI, gameAdvice: "NEXT_GAME_ADVICE")
+        do {
+            _ = try await cli.complete(call)
+            XCTFail("A transport must not hide a second generation attempt")
+        } catch { XCTAssertEqual(error as? ChatError, .cli(.connection)) }
+        let response = try await cli.complete(call)
         XCTAssertEqual(ChatParser.moveIntent(from: response)?.move, "e2e4")
     }
 

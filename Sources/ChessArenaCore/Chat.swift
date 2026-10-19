@@ -27,6 +27,7 @@ public enum ChatRoute: String, Sendable { case http, geminiCLI, anthropic, claud
 public enum ChatResponseFormat: Sendable { case text, jsonObject }
 
 public struct Seat: Equatable, Sendable {
+    public var maxOutputTokens: Int? = nil
     public var route: ChatRoute
     public var name: String
     public var baseURL: URL
@@ -64,6 +65,7 @@ public struct Seat: Equatable, Sendable {
 }
 
 public struct ChatCall: Equatable, Sendable {
+    public var maxOutputTokens: Int? = nil
     public var chessPosition: LC0Position? = nil
     public var responseFormat: ChatResponseFormat
     public var route: ChatRoute
@@ -103,22 +105,38 @@ public struct ChatCall: Equatable, Sendable {
     }
 }
 
+public enum ResponseFailure: String, Sendable, Codable {
+    case truncated, empty, schema, illegalMove
+    public var userMessage: String {
+        switch self {
+        case .truncated: return "Ответ обрезан: исчерпан лимит токенов или контекста. Проверьте бюджет ответа и продолжите партию."
+        case .empty: return "Модель вернула пустой итоговый ответ."
+        case .schema: return "Ответ модели не соответствует формату хода."
+        case .illegalMove: return "Модель предложила нелегальный ход."
+        }
+    }
+}
+
 public enum ChatError: Error, Equatable {
     case cli(GeminiCLIError)
     case transport
     case timeout
     case http(status: Int, reason: APIErrorReason)
     case unreadable
+    case response(ResponseFailure)
     /// The provider answered 200 but declined to produce a reply; repeating the same request changes nothing.
     case refused
     case claudeCLI(ClaudeCLIError)
     case lc0(LC0Error)
 
-    /// Local CLI failures and refusals need the user, not a timer: the engine pauses without automatic retry.
+    /// Retry only known transient failures; access/configuration failures require user action.
     public var pausesWithoutRetry: Bool {
         switch self {
+        case .cli(.timeout), .cli(.connection), .claudeCLI(.timeout), .claudeCLI(.connection), .lc0(.timeout): return false
         case .cli, .claudeCLI, .lc0, .refused: return true
-        case .transport, .timeout, .http, .unreadable: return false
+        case .response(.truncated): return true
+        case .http(_, let reason): return reason != .server && reason != .rateLimit
+        case .transport, .timeout, .unreadable, .response: return false
         }
     }
 
@@ -131,6 +149,7 @@ public enum ChatError: Error, Equatable {
         case .transport: return "Не удалось соединиться с API. Проверьте сеть и повторите ход."
         case .timeout: return "API не ответил за отведённое время. Повторите ход."
         case .unreadable: return "API вернул нечитаемый ответ."
+        case .response(let reason): return reason.userMessage
         case .http(let status, let reason):
             return "HTTP \(status): \(reason.userMessage)"
         }
@@ -190,11 +209,13 @@ public enum APIErrorReason: String, Equatable {
 
 public protocol ChatTransport: AnyObject {
     func requestURL(for call: ChatCall) -> URL
+    func requestTimeout(for call: ChatCall) -> TimeInterval?
     func complete(_ call: ChatCall) async throws -> String
 }
 
 public extension ChatTransport {
     func requestURL(for call: ChatCall) -> URL { call.url }
+    func requestTimeout(for call: ChatCall) -> TimeInterval? { nil }
 }
 
 public enum ChatParser {
@@ -333,11 +354,13 @@ public final class URLSessionChatTransport: ChatTransport {
         self.timeout = timeout
     }
 
+    public func requestTimeout(for call: ChatCall) -> TimeInterval? { timeout }
+
     public func complete(_ call: ChatCall) async throws -> String {
         guard call.route == .http else { throw ChatError.cli(.missing) }
         var request = URLRequest(url: call.url)
         request.httpMethod = "POST"
-        request.timeoutInterval = timeout
+        request.timeoutInterval = try RequestTiming.timeout(fallback: timeout)
         request.setValue("Bearer \(call.apiKey.trimmingCharacters(in: .whitespacesAndNewlines))", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let payload: [String: Any] = [
@@ -353,6 +376,10 @@ public final class URLSessionChatTransport: ChatTransport {
                 guard (200..<300).contains(http.statusCode) else {
                     throw ChatError.http(status: http.statusCode, reason: APIErrorReason.classify(status: http.statusCode, data: data))
                 }
+                let metadata = ResponseMetadata.chatCompletion(data)
+                await ResponseTrace.receive?(metadata)
+                if metadata.finishReason == "length" { throw ChatError.response(.truncated) }
+                if metadata.finishReason == "content_filter" { throw ChatError.refused }
                 guard let content = ChatParser.messageContent(from: data) else { throw ChatError.unreadable }
                 return content
             }

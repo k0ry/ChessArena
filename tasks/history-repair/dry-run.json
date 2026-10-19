@@ -1,0 +1,49 @@
+{
+  "status": "prepared",
+  "pair": [
+    "deepseek-v4-pro",
+    "gemini-4-argon-high"
+  ],
+  "scoreKey": "seriesScore.DeepSeek|Gemini",
+  "before": {
+    "games": 2,
+    "whiteHalfPoints": 0,
+    "blackHalfPoints": 4
+  },
+  "after": {
+    "games": 0,
+    "whiteHalfPoints": 0,
+    "blackHalfPoints": 0
+  },
+  "continuingRound": "9B89936B-6528-4EDE-B66B-8FB30E481F03",
+  "positionPreserved": "r1b1k2r/1pqnbppp/p2ppn2/6B1/3NPP2/2N2Q2/PPP3PP/2KR1B1R w kq - 5 10",
+  "evidence": [
+    {
+      "archive": "/Users/supafil/Documents/ChessArena/2026-10-18T10-41-38Z-9E1580F5-FFC5-4210-8D72-7639AAEB8C28-18E13878-4776-46CA-BDBA-3D3287258F78/game.pgn",
+      "sha256": "173536e6a7570e9d1ee260cb9023f54ca273ffeb3cdecaa03a8f887dcc1e2592",
+      "originalResult": "0-1",
+      "correctedResult": "*",
+      "fen": "r2q1rk1/1p1nbppp/p2pbn2/4p3/4P3/1NN1BP2/PPPQ2PP/2KR1B1R w - - 5 11",
+      "legalMoves": 40,
+      "reason": "Nonterminal board; legacy three-error forfeit",
+      "providerTrigger": "unknown"
+    },
+    {
+      "archive": "/Users/supafil/Documents/ChessArena/2026-10-18T11-27-23Z-96E0A6B1-97E0-4F85-BCF7-35F6EC149549-915ADB6D-B12D-41DE-9083-CA37FBA2AB45/game.pgn",
+      "sha256": "947cd549eff1902a5f05e6083b2064ba5be833d5c143c4a1ffe89635931ca0c4",
+      "originalResult": "0-1",
+      "correctedResult": "*",
+      "fen": "r2q1rk1/3nbppp/p2pb3/4p1Pn/1p2P3/1N2BP2/PPPQN2P/2KR1B1R w - - 2 14",
+      "legalMoves": 36,
+      "reason": "Nonterminal board; legacy three-error forfeit",
+      "providerTrigger": "unknown"
+    }
+  ],
+  "quarantined": [
+    "gameMemory:deepseek-v4-pro",
+    "gameMemory:gemini-4-argon-high",
+    "game.gameMemory:deepseek-v4-pro",
+    "game.gameMemory:gemini-4-argon-high"
+  ],
+  "note": "Original PGN, commentary and video remain unchanged. No LC0 preference was modified."
+}

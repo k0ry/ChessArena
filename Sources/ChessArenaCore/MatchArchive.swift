@@ -15,6 +15,9 @@ public enum ArchiveError: Error {
 }
 
 public final class MatchArchive {
+    public let roundID: UUID
+    public private(set) var diagnosticError: String?
+    private var termination = "unterminated"
     public let directory: URL
     public private(set) var isOpen = false
     public private(set) var moves: [AcceptedMove] = []
@@ -24,17 +27,50 @@ public final class MatchArchive {
     private var writer: ArenaVideoWriter?
     private var result = "*"
 
-    public init(directory: URL, whiteName: String, blackName: String) {
+    public init(directory: URL, whiteName: String, blackName: String, roundID: UUID = UUID()) {
+        self.roundID = roundID
         self.directory = directory
         self.whiteName = whiteName
         self.blackName = blackName
     }
 
-    public func restore(moves: [AcceptedMove], journal: [JournalEntry], end: GameEnd?) {
+    public func restore(moves: [AcceptedMove], journal: [JournalEntry], end: GameEnd?, position: Position? = nil) {
         precondition(!isOpen)
         self.moves = moves
         self.journal = journal
-        markResult(end)
+        markResult(end, position: position)
+    }
+
+    public func writeParticipants(white: Seat, black: Seat) throws {
+        struct Participant: Encodable { var provider: String; var model: String; var side: Side }
+        struct Metadata: Encodable { var roundID: UUID; var participants: [Participant] }
+        let metadata = Metadata(roundID: roundID, participants: [white, black].map {
+            Participant(provider: DeepSeekAPI.redact($0.name, key: $0.apiKey), model: DeepSeekAPI.redact($0.model, key: $0.apiKey), side: $0.side)
+        })
+        try JSONEncoder().encode(metadata).write(to: directory.appendingPathComponent("participants.json"), options: .atomic)
+    }
+
+    public var diagnosticsURL: URL { directory.appendingPathComponent("diagnostics.jsonl") }
+
+    /// Append every event immediately so an interrupted video export cannot erase the diagnosis.
+    public func record(diagnostic: MatchDiagnostic) {
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            var data = try JSONEncoder().encode(diagnostic)
+            data.append(0x0a)
+            if !FileManager.default.fileExists(atPath: diagnosticsURL.path) {
+                try data.write(to: diagnosticsURL, options: .withoutOverwriting)
+            } else {
+                let file = try FileHandle(forWritingTo: diagnosticsURL)
+                defer { try? file.close() }
+                try file.seekToEnd()
+                try file.write(contentsOf: data)
+                try file.synchronize()
+            }
+            try writeSidecars()
+        } catch {
+            diagnosticError = "Не удалось сохранить диагностику партии. Проверьте папку архива и свободное место."
+        }
     }
 
     public var videoURL: URL { directory.appendingPathComponent("match.mp4") }
@@ -61,11 +97,14 @@ public final class MatchArchive {
         journal.append(JournalEntry(kind: line.kind.rawValue, text: line.text, clock: line.clock, move: move))
     }
 
-    public func markResult(_ end: GameEnd?) {
-        guard let end else {
+    public func markResult(_ end: GameEnd?, position: Position? = nil) {
+        let board = moves.last.flatMap { Position.position(fen: $0.fenAfter) } ?? position ?? .standard()
+        guard let end, board.gameEnd == end else {
             result = "*"
+            termination = "unterminated"
             return
         }
+        termination = end == .stalemate ? "stalemate" : "checkmate"
         switch end.winner {
         case .white:
             result = "1-0"
@@ -92,12 +131,12 @@ public final class MatchArchive {
         try await finish(end: nil)
     }
 
-    public func finish(end: GameEnd?) async throws {
+    public func finish(end: GameEnd?, position: Position? = nil) async throws {
         guard isOpen else { return }
         isOpen = false
         let finishingWriter = writer
         writer = nil
-        markResult(end)
+        markResult(end, position: position)
         try writeSidecars()
         try await finishingWriter?.finish()
     }
@@ -106,7 +145,7 @@ public final class MatchArchive {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try pgnText().write(to: pgnURL, atomically: true, encoding: .utf8)
         let data = try JSONEncoder().encode(journal)
-        try data.write(to: journalURL)
+        try data.write(to: journalURL, options: .atomic)
     }
 
     public func pgnText() -> String {
@@ -129,6 +168,8 @@ public final class MatchArchive {
         [White "\(whiteName)"]
         [Black "\(blackName)"]
         [Result "\(result)"]
+        [Termination "\(termination)"]
+        [Round "\(roundID.uuidString)"]
 
         \(body)
         """
